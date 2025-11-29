@@ -11,6 +11,18 @@ void load_model(Weights* w, Config* p, const char* checkpoint_path);
 void malloc_run_state(RunState* s, Config* p);
 void free_run_state(RunState* s);
 
+// Tokenizer (Minimal)
+typedef struct {
+    char** vocab;
+    float* vocab_scores;
+    int vocab_size;
+    unsigned char byte_pieces[512];
+} Tokenizer;
+
+void build_tokenizer(Tokenizer* t, const char* tokenizer_path, int vocab_size);
+void free_tokenizer(Tokenizer* t);
+const char* decode_token(Tokenizer* t, int token);
+
 void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
     
     // 1. Embedding
@@ -101,10 +113,14 @@ int main(int argc, char** argv) {
     Config config;
     Weights weights;
     RunState state;
+    Tokenizer tokenizer;
 
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
     malloc_run_state(&state, &config);
+    
+    // Try to load tokenizer if it exists
+    build_tokenizer(&tokenizer, "data/tokenizer.bin", config.vocab_size);
     
     int token = 1; // BOS token
     int pos = 0;
@@ -138,7 +154,8 @@ int main(int argc, char** argv) {
             free(host_logits);
         #endif
         
-        printf("%d ", next_token);
+        const char* text = decode_token(&tokenizer, next_token);
+        printf("%s", text);
         fflush(stdout);
         
         token = next_token;
@@ -149,6 +166,7 @@ int main(int argc, char** argv) {
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
     printf("Time: %.2fs, %.2f tok/s\n", time_spent, steps / time_spent);
 
+    free_tokenizer(&tokenizer);
     free_run_state(&state);
     free_ops();
     // free weights...
