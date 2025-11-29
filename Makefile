@@ -24,7 +24,7 @@ NVCC_FLAGS = -O3 -Iinclude -arch=native
 LDFLAGS_GPU = -L$(CUDA_PATH)/lib64 -lcudart -lcublas -lm
 
 # Common Sources
-SRCS_C = src/main.c src/model.c src/tokenizer.c
+SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c
 OBJS_C = $(SRCS_C:.c=.o)
 
 # CPU Sources

@@ -5,6 +5,7 @@
 #include "structs.h"
 #include "ops.h"
 #include "nano_cuda.h"
+#include "log.h"
 
 // Forward declarations
 void load_model(Weights* w, Config* p, const char* checkpoint_path);
@@ -22,6 +23,14 @@ typedef struct {
 void build_tokenizer(Tokenizer* t, const char* tokenizer_path, int vocab_size);
 void free_tokenizer(Tokenizer* t);
 const char* decode_token(Tokenizer* t, int token);
+
+// Sampler
+typedef struct {
+    unsigned long long state;
+} Sampler;
+
+void build_sampler(Sampler* s, unsigned long long seed);
+int sample(Sampler* s, float* logits, int vocab_size, float temperature);
 
 void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
     
@@ -108,12 +117,14 @@ int main(int argc, char** argv) {
     }
 
     // Initialize libraries
+    log_init("nano_vllm.log");
     init_ops();
 
     Config config;
     Weights weights;
     RunState state;
     Tokenizer tokenizer;
+    Sampler sampler;
 
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
@@ -121,12 +132,20 @@ int main(int argc, char** argv) {
     
     // Try to load tokenizer if it exists
     build_tokenizer(&tokenizer, "data/tokenizer.bin", config.vocab_size);
+    build_sampler(&sampler, (unsigned long long)time(NULL)); // Seed with time
     
     int token = 1; // BOS token
     int pos = 0;
     
-    printf("Starting inference for %d steps...\n", steps);
+    log_printf("Starting inference for %d steps...\n", steps);
     clock_t start = clock();
+    
+    // Buffer for accumulating text
+    // Allocate enough space (steps * 100) roughly, or just dynamic.
+    // For Phase 1 simple demo, fixed large buffer is fine.
+    // Typical token len is < 10 chars. 50 steps * 10 = 500.
+    char* text_buffer = (char*)malloc(steps * 100 + 1024);
+    text_buffer[0] = '\0';
     
     for (pos = 0; pos < steps; pos++) {
         transformer(token, pos, &config, &state, &weights);
@@ -141,34 +160,43 @@ int main(int argc, char** argv) {
             host_logits = state.logits;
         #endif
         
-        int next_token = 0;
-        float max_val = -INFINITY;
-        for (int i = 0; i < config.vocab_size; i++) {
-            if (host_logits[i] > max_val) {
-                max_val = host_logits[i];
-                next_token = i;
-            }
-        }
+        // Sample next token (Temperature = 1.0f)
+        int next_token = sample(&sampler, host_logits, config.vocab_size, 1.0f);
         
         #ifdef __CUDACC__
             free(host_logits);
         #endif
         
         const char* text = decode_token(&tokenizer, next_token);
-        printf("%s", text);
+        // Print real-time token (optional, maybe just visualizer?)
+        // We keep printing it so user sees progress.
+        log_printf("%s", text);
         fflush(stdout);
+        
+        // Accumulate
+        strcat(text_buffer, text);
         
         token = next_token;
     }
-    printf("\n");
+    log_printf("\n\n");
+    
+    // Print accumulated text
+    log_printf("==================================================\n");
+    log_printf("Generated Text:\n");
+    log_printf("==================================================\n");
+    log_printf("%s\n", text_buffer);
+    log_printf("==================================================\n");
+    
+    free(text_buffer);
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Time: %.2fs, %.2f tok/s\n", time_spent, steps / time_spent);
+    log_printf("Time: %.2fs, %.2f tok/s\n", time_spent, steps / time_spent);
 
     free_tokenizer(&tokenizer);
     free_run_state(&state);
     free_ops();
+    log_close();
     // free weights...
     
     return 0;

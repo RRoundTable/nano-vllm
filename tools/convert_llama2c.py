@@ -3,17 +3,38 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+def read_and_transpose(f_in, rows, cols, dtype=np.float32):
+    """
+    Read matrix of shape [rows, cols] from file,
+    Transpose to [cols, rows],
+    Flatten and return bytes.
+    """
+    # Read data (assuming float32 input)
+    # Note: llama2.c bin uses float32.
+    count = rows * cols
+    data_bytes = f_in.read(count * 4)
+    if len(data_bytes) != count * 4:
+        raise ValueError(f"Failed to read {count} floats")
+    
+    # Load into numpy array
+    arr = np.frombuffer(data_bytes, dtype=dtype)
+    # Original shape: [rows, cols]
+    arr = arr.reshape(rows, cols)
+    # Transpose: [cols, rows]
+    arr_T = arr.T
+    # Flatten and return bytes
+    return arr_T.flatten().tobytes()
+
 def convert_karpathy_bin(input_path, output_path):
     print(f"Converting {input_path} -> {output_path}")
     
     with open(input_path, 'rb') as f_in:
         # Read Karpathy Header (7 ints)
-        # dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len
         header_data = f_in.read(7 * 4)
         dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len = struct.unpack('iiiiiii', header_data)
         
         head_dim = dim // n_heads
-        rope_theta = 10000.0 # Default for Llama 2
+        rope_theta = 10000.0 
         
         print("Detected Config:")
         print(f"  dim: {dim}")
@@ -23,10 +44,10 @@ def convert_karpathy_bin(input_path, output_path):
         print(f"  n_kv_heads: {n_kv_heads}")
         print(f"  vocab_size: {vocab_size}")
         print(f"  max_seq_len: {max_seq_len}")
+        print(f"  head_dim: {head_dim}")
         
         with open(output_path, 'wb') as f_out:
-            # Write My Header (8 ints + 1 float)
-            # dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len, hidden_dim, head_dim, rope_theta
+            # Write My Header
             new_header = struct.pack(
                 'iiiiiiiif',
                 dim, n_layers, n_heads, n_kv_heads,
@@ -34,121 +55,90 @@ def convert_karpathy_bin(input_path, output_path):
             )
             f_out.write(new_header)
             
-            # Copy Weights
-            # Karpathy's order usually matches ours for standard layers
-            # except possibly FFN or Shared Weights.
-            # 
-            # llama2.c structure:
-            # 1. token_embedding [vocab_size * dim]
-            # 2. layers:
-            #    - attention_norm [dim]
-            #    - wq [dim * n_heads * head_dim]
-            #    - wk [dim * n_kv_heads * head_dim]
-            #    - wv [dim * n_kv_heads * head_dim]
-            #    - wo [n_heads * head_dim * dim]
-            #    - ffn_norm [dim]
-            #    - w_gate [dim * hidden_dim]
-            #    - w_down [hidden_dim * dim]
-            #    - w_up   [dim * hidden_dim]
-            # 3. final_norm [dim]
-            # 4. lm_head [vocab_size * dim] (if not shared)
-            
-            # My structure expects:
-            # ...
-            #    - w_gate
-            #    - w_up     <-- Swapped in some implementations
-            #    - w_down   <-- Swapped in some implementations
-            
-            # Let's just copy everything blindly first. 
-            # The tensor sizes are:
-            # token_emb: V*D
-            # For each layer:
-            #   att_norm: D
-            #   wq: D * (H*HD)
-            #   wk: D * (KVH*HD)
-            #   wv: D * (KVH*HD)
-            #   wo: (H*HD) * D
-            #   ffn_norm: D
-            #   w_gate: D * HDim
-            #   w_down: HDim * D
-            #   w_up:   D * HDim
-            
-            # Wait, llama2.c stores w_gate, w_down, w_up in that order?
-            # Let's check size to be sure.
-            # w_gate, w_up are [D, HDim]. w_down is [HDim, D].
-            # Since D != HDim usually, we can distinguish?
-            # In stories15M: D=288, HDim=768.
-            # D * HDim = 221184.
-            # All three matrices have same number of elements!
-            
-            # If I just copy the stream, I get: gate, down, up.
-            # My model.c reads: gate, up, down.
-            # So if llama2.c is (gate, down, up), I need to reorder.
-            # 
-            # Checking Karpathy's llama2.c source (export.py or run.c):
-            # The export script writes:
-            # layer.feed_forward.w1.weight (gate)
-            # layer.feed_forward.w2.weight (down)
-            # layer.feed_forward.w3.weight (up)
-            #
-            # My model.c reads:
-            # l->w_gate = load_tensor(...)
-            # l->w_up = load_tensor(...)
-            # l->w_down = load_tensor(...)
-            #
-            # So I need to read 3 chunks (gate, down, up) and write (gate, up, down).
-            
             # 1. Token Embedding
             blob = f_in.read(vocab_size * dim * 4)
             f_out.write(blob)
             
             # 2. Layers
             for i in range(n_layers):
+                print(f"Processing Layer {i}...")
                 # att_norm
                 f_out.write(f_in.read(dim * 4))
-                # wq
-                f_out.write(f_in.read(dim * n_heads * head_dim * 4))
-                # wk
-                f_out.write(f_in.read(dim * n_kv_heads * head_dim * 4))
-                # wv
-                f_out.write(f_in.read(dim * n_kv_heads * head_dim * 4))
-                # wo
-                f_out.write(f_in.read(n_heads * head_dim * dim * 4))
+                
+                # wq: [dim, n_heads * head_dim] -> Transpose -> [n_heads * head_dim, dim]
+                # But wait, my `matmul` expects `weight[j * out_dim + i]` which assumes 
+                # weight is stored as [in_dim, out_dim] row-major.
+                # i.e. W[0,0], W[0,1]...
+                #
+                # Karpathy stores [out_dim, in_dim] row-major.
+                # So W[0,0] is weight from Input[0] to Output[0].
+                # Wait, PyTorch Linear(in, out) weights are [out, in].
+                # W[i, j] is weight connecting Input[j] to Output[i].
+                #
+                # My matmul: `val += in[j] * weight[j * out_dim + i]`
+                # It wants W[j, i] at `j * out_dim + i`.
+                # This means it wants `[in_dim, out_dim]` layout.
+                #
+                # So if file has `[out_dim, in_dim]`, I need to Transpose it to `[in_dim, out_dim]`.
+                # Yes.
+                
+                # wq: out=n_heads*head_dim, in=dim
+                f_out.write(read_and_transpose(f_in, n_heads * head_dim, dim))
+                
+                # wk: out=n_kv_heads*head_dim, in=dim
+                f_out.write(read_and_transpose(f_in, n_kv_heads * head_dim, dim))
+                
+                # wv: out=n_kv_heads*head_dim, in=dim
+                f_out.write(read_and_transpose(f_in, n_kv_heads * head_dim, dim))
+                
+                # wo: out=dim, in=n_heads*head_dim
+                f_out.write(read_and_transpose(f_in, dim, n_heads * head_dim))
+                
                 # ffn_norm
                 f_out.write(f_in.read(dim * 4))
                 
                 # FFN Weights: Read gate, down, up
-                w_gate_data = f_in.read(dim * hidden_dim * 4)
-                w_down_data = f_in.read(hidden_dim * dim * 4)
-                w_up_data   = f_in.read(dim * hidden_dim * 4)
+                # w_gate (w1): out=hidden, in=dim
+                w_gate_T = read_and_transpose(f_in, hidden_dim, dim)
+                
+                # w_down (w2): out=dim, in=hidden
+                w_down_T = read_and_transpose(f_in, dim, hidden_dim)
+                
+                # w_up (w3): out=hidden, in=dim
+                w_up_T   = read_and_transpose(f_in, hidden_dim, dim)
                 
                 # Write gate, up, down
-                f_out.write(w_gate_data)
-                f_out.write(w_up_data)
-                f_out.write(w_down_data)
+                f_out.write(w_gate_T)
+                f_out.write(w_up_T)
+                f_out.write(w_down_T)
             
             # 3. Final Norm
             f_out.write(f_in.read(dim * 4))
             
-            # 4. LM Head (Optional in llama2.c?)
-            # If file ends here, it's shared.
-            # Check remaining bytes
+            # 4. LM Head
             remaining = f_in.read()
             expected_lm_head_size = vocab_size * dim * 4
             
             if len(remaining) == expected_lm_head_size:
                 print(f"  Writing separate LM Head ({len(remaining)} bytes)")
-                f_out.write(remaining)
+                # LM Head: out=vocab_size, in=dim. Needs Transpose!
+                # But I already read bytes. Convert to numpy.
+                arr = np.frombuffer(remaining, dtype=np.float32)
+                arr = arr.reshape(vocab_size, dim)
+                arr_T = arr.T # [dim, vocab_size]
+                f_out.write(arr_T.flatten().tobytes())
             else:
-                if len(remaining) > 0:
-                    print(f"  Warning: Found {len(remaining)} extra bytes, but expected {expected_lm_head_size} for LM Head.")
-                    print("  Assuming shared weights and ignoring extra bytes.")
-                
                 print("  Shared LM Head (copying token embedding)")
-                # Re-write token embedding as LM Head
-                f_in.seek(7 * 4) # Skip header to start of token embedding
-                token_emb_data = f_in.read(vocab_size * dim * 4)
-                f_out.write(token_emb_data)
+                # Re-read token embedding
+                f_in.seek(7 * 4) # Skip header
+                token_emb_bytes = f_in.read(vocab_size * dim * 4)
+                
+                # Token Embedding is [vocab_size, dim].
+                # LM Head needs [dim, vocab_size] (Transpose of embedding).
+                arr = np.frombuffer(token_emb_bytes, dtype=np.float32)
+                arr = arr.reshape(vocab_size, dim)
+                arr_T = arr.T
+                f_out.write(arr_T.flatten().tobytes())
 
     print("Conversion Complete.")
 
@@ -159,4 +149,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     convert_karpathy_bin(args.input, args.output)
-
