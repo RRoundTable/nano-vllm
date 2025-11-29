@@ -33,8 +33,6 @@ typedef struct {
     float* rms_final_weight;      // [dim]
     float* lm_head;               // [vocab_size, dim]
     
-    // Helper to keep track of allocated device memory to free it later
-    // (Optional, depending on implementation)
     void* _data_buffer; 
 } Weights;
 
@@ -58,4 +56,3 @@ typedef struct {
 } RunState;
 
 #endif // STRUCTS_H
-

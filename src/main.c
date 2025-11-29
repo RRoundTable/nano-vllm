@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <time.h>
 #include "structs.h"
 #include "ops.h"
@@ -26,7 +27,6 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         
         // b. QKV Matmuls
         // xb [dim] @ wq [dim, n_heads * head_dim] -> q [n_heads * head_dim]
-        // Note: Our matmul is: out = in @ weight
         matmul(s->q, s->xb, l->wq, p->dim, p->n_heads * p->head_dim);
         matmul(s->k, s->xb, l->wk, p->dim, p->n_kv_heads * p->head_dim);
         matmul(s->v, s->xb, l->wv, p->dim, p->n_kv_heads * p->head_dim);
@@ -42,6 +42,14 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         // out = xb2 (reusing buffer)
         multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
                              i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+        
+        // [Visualizer] Show Attention Patterns for Layer 0
+        #ifndef __CUDACC__
+        if (i == 0) {
+            visualize_attention(s->att, p->n_heads, pos, p->max_seq_len);
+            visualize_kv_cache_usage(i, pos, p->max_seq_len);
+        }
+        #endif
         
         // f. Output Projection
         // xb2 [n_heads * head_dim] @ wo [n_heads * head_dim, dim] -> xb [dim] (reuse xb)
@@ -72,18 +80,6 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
     rms_norm(s->x, s->x, w->rms_final_weight, p->dim, 1e-5f);
     
     // 4. Classifier (LM Head)
-    // x [dim] @ lm_head [dim, vocab_size] -> logits [vocab_size]
-    // Wait, lm_head stored as [vocab_size, dim].
-    // If we use our matmul, we expect [in_dim, out_dim].
-    // So lm_head in file is [vocab_size, dim] (rows are tokens?).
-    // Usually lm_head weights are [vocab_size, dim].
-    // To project x [dim] to logits [vocab_size], we need W [dim, vocab_size].
-    // The file has [vocab_size, dim] (transposed relative to what we need).
-    // And export_binary.py writes `lm_head.weight.t()`.
-    // PyTorch `lm_head` is `Linear(dim, vocab_size)`. Weights are `[vocab_size, dim]`.
-    // `t()` makes it `[dim, vocab_size]`.
-    // So file has `[dim, vocab_size]`.
-    // This matches our matmul requirement: `matmul(out, in, w, dim, vocab_size)`.
     matmul(s->logits, s->x, w->lm_head, p->dim, p->vocab_size);
 }
 
@@ -110,25 +106,24 @@ int main(int argc, char** argv) {
     load_model(&weights, &config, model_path);
     malloc_run_state(&state, &config);
     
-    int token = 1; // BOS token (usually 1 for Llama)
+    int token = 1; // BOS token
     int pos = 0;
     
     printf("Starting inference for %d steps...\n", steps);
-    
-    // Simple generation loop
-    // (We don't have a tokenizer in C yet, so we just print raw token IDs)
-    
-    // Timer
     clock_t start = clock();
     
     for (pos = 0; pos < steps; pos++) {
         transformer(token, pos, &config, &state, &weights);
         
-        // Argmax to get next token
         // Copy logits to host to find max
-        // This is slow but fine for Phase 1
-        float* host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-        cudaCheck(cudaMemcpy(host_logits, state.logits, config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        float* host_logits;
+        #ifdef __CUDACC__
+            host_logits = (float*)malloc(config.vocab_size * sizeof(float));
+            cudaCheck(cudaMemcpy(host_logits, state.logits, config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+        #else
+            // In CPU mode, state.logits is already on host
+            host_logits = state.logits;
+        #endif
         
         int next_token = 0;
         float max_val = -INFINITY;
@@ -138,7 +133,10 @@ int main(int argc, char** argv) {
                 next_token = i;
             }
         }
-        free(host_logits);
+        
+        #ifdef __CUDACC__
+            free(host_logits);
+        #endif
         
         printf("%d ", next_token);
         fflush(stdout);
@@ -157,4 +155,3 @@ int main(int argc, char** argv) {
     
     return 0;
 }
-
