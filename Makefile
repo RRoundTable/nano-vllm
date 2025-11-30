@@ -1,61 +1,49 @@
-CC = gcc
-NVCC = nvcc
-CUDA_PATH ?= /usr/local/cuda
-
-# CPU Config
-# Check if we are on Mac (Darwin) to handle OpenMP differently
-UNAME_S := $(shell uname -s)
-
-ifeq ($(UNAME_S),Darwin)
-    # Mac (Clang) usually needs libomp installed (brew install libomp)
-    # For simplicity in standard envs without libomp, we can disable OpenMP or try to detect it.
-    # Let's just remove -fopenmp for now to ensure it compiles out-of-the-box on standard Mac.
-    # If user has libomp, they can add it back.
-    CFLAGS = -O3 -Wall -Iinclude
-    LDFLAGS_CPU = -lm
-else
-    # Linux (GCC)
-    CFLAGS = -O3 -Wall -Iinclude -fopenmp
-    LDFLAGS_CPU = -lm -lgomp
-endif
-
-# GPU Config
-NVCC_FLAGS = -O3 -Iinclude -arch=native
-LDFLAGS_GPU = -L$(CUDA_PATH)/lib64 -lcudart -lcublas -lm
-
-# Common Sources
-SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c
-OBJS_C = $(SRCS_C:.c=.o)
-
-# CPU Sources
-SRCS_CPU = kernels/cpu/kernels.c kernels/cpu/visualizer.c
-OBJS_CPU = $(SRCS_CPU:.c=.o)
-
-# GPU Sources
-SRCS_GPU = kernels/gpu/layers.cu kernels/gpu/attention.cu
-OBJS_GPU = $(SRCS_GPU:.cu=.o)
-
 TARGET_CPU = nano_vllm_cpu
 TARGET_GPU = nano_vllm_gpu
+CC = gcc
+NVCC = nvcc
 
-# Default target
+# Flags for Mac (CPU)
+CFLAGS = -O3 -Wall -Iinclude
+LDFLAGS_CPU = -lm
+
+# Conditional OpenMP for CPU
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # Mac Default Clang doesn't support -fopenmp easily
+else
+    CFLAGS += -fopenmp
+    LDFLAGS_CPU += -fopenmp
+endif
+
+# Flags for CUDA
+NVCC_FLAGS = -O3 -arch=sm_70 -Iinclude
+
+# Sources
+SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c
+SRCS_CU = kernels/gpu/layers.cu kernels/gpu/attention.cu
+SRCS_CPU_KERNELS = kernels/cpu/kernels.c kernels/cpu/visualizer.c
+
+# Objects
+OBJS_C = $(SRCS_C:.c=.o)
+OBJS_CPU_KERNELS = $(SRCS_CPU_KERNELS:.c=.o)
+
+all: $(TARGET_CPU)
+
+# CPU Build
 cpu: $(TARGET_CPU)
 
-gpu: $(TARGET_GPU)
-
-$(TARGET_CPU): $(OBJS_C) $(OBJS_CPU)
+$(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS_CPU)
-
-$(TARGET_GPU): $(OBJS_C) $(OBJS_GPU)
-	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS_GPU)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-%.o: %.cu
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+# GPU Build (requires nvcc)
+gpu: $(TARGET_GPU)
+
+$(TARGET_GPU): $(SRCS_C) $(SRCS_CU)
+	$(NVCC) $(NVCC_FLAGS) -o $@ $^ -lcublas
 
 clean:
-	rm -f src/*.o kernels/cpu/*.o kernels/gpu/*.o $(TARGET_CPU) $(TARGET_GPU)
-
-.PHONY: cpu gpu clean
+	rm -f $(TARGET_CPU) $(TARGET_GPU) src/*.o kernels/cpu/*.o *.log

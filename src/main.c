@@ -5,7 +5,7 @@
 #include <string.h>
 #include "structs.h"
 #include "ops.h"
-#include "nano_cuda.h"
+#include "backend.h"
 #include "log.h"
 
 // Forward declarations
@@ -62,7 +62,7 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
 
     // 1. Embedding
     float* content_row = w->token_embedding_table + token * p->dim;
-    cudaCheck(cudaMemcpy(s->x, content_row, p->dim * sizeof(float), cudaMemcpyDeviceToDevice));
+    check_status(device_memcpy(s->x, content_row, p->dim * sizeof(float), DEVICE_TO_DEVICE));
     
     // 2. Forward layers
     for(int i = 0; i < p->n_layers; i++) {
@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
         float* host_logits;
         #ifdef __CUDACC__
             host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-            cudaCheck(cudaMemcpy(host_logits, state.logits, config.vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+            check_status(device_memcpy(host_logits, state.logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
         #else
             // In CPU mode, state.logits is already on host
             host_logits = state.logits;

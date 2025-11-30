@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "structs.h"
-#include "nano_cuda.h"
+#include "backend.h"
 
 // Helper to allocate and read a tensor from file to GPU
 float* load_tensor(FILE* f, size_t size) {
@@ -17,8 +17,8 @@ float* load_tensor(FILE* f, size_t size) {
     }
     
     float* device_ptr;
-    cudaCheck(cudaMalloc((void**)&device_ptr, size * sizeof(float)));
-    cudaCheck(cudaMemcpy(device_ptr, host_ptr, size * sizeof(float), cudaMemcpyHostToDevice));
+    check_status(device_malloc((void**)&device_ptr, size * sizeof(float)));
+    check_status(device_memcpy(device_ptr, host_ptr, size * sizeof(float), HOST_TO_DEVICE));
     
     free(host_ptr);
     return device_ptr;
@@ -87,35 +87,34 @@ void malloc_run_state(RunState* s, Config* p) {
     int head_dim = p->head_dim;
     int n_heads = p->n_heads;
 
-    cudaCheck(cudaMalloc((void**)&s->x, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->xb, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->xb2, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->hb, hidden_dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->hb2, hidden_dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->q, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->k, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->v, dim * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->att, n_heads * max_seq_len * sizeof(float))); // Should be enough for one step
-    cudaCheck(cudaMalloc((void**)&s->logits, vocab_size * sizeof(float)));
+    check_status(device_malloc((void**)&s->x, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->xb, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->xb2, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->hb, hidden_dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->hb2, hidden_dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->q, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->k, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->v, dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->att, n_heads * max_seq_len * sizeof(float))); // Should be enough for one step
+    check_status(device_malloc((void**)&s->logits, vocab_size * sizeof(float)));
     
     // KV Cache
     size_t cache_size = (size_t)n_layers * max_seq_len * n_kv_heads * head_dim;
-    cudaCheck(cudaMalloc((void**)&s->key_cache, cache_size * sizeof(float)));
-    cudaCheck(cudaMalloc((void**)&s->value_cache, cache_size * sizeof(float)));
+    check_status(device_malloc((void**)&s->key_cache, cache_size * sizeof(float)));
+    check_status(device_malloc((void**)&s->value_cache, cache_size * sizeof(float)));
 }
 
 void free_run_state(RunState* s) {
-    cudaCheck(cudaFree(s->x));
-    cudaCheck(cudaFree(s->xb));
-    cudaCheck(cudaFree(s->xb2));
-    cudaCheck(cudaFree(s->hb));
-    cudaCheck(cudaFree(s->hb2));
-    cudaCheck(cudaFree(s->q));
-    cudaCheck(cudaFree(s->k));
-    cudaCheck(cudaFree(s->v));
-    cudaCheck(cudaFree(s->att));
-    cudaCheck(cudaFree(s->logits));
-    cudaCheck(cudaFree(s->key_cache));
-    cudaCheck(cudaFree(s->value_cache));
+    check_status(device_free(s->x));
+    check_status(device_free(s->xb));
+    check_status(device_free(s->xb2));
+    check_status(device_free(s->hb));
+    check_status(device_free(s->hb2));
+    check_status(device_free(s->q));
+    check_status(device_free(s->k));
+    check_status(device_free(s->v));
+    check_status(device_free(s->att));
+    check_status(device_free(s->logits));
+    check_status(device_free(s->key_cache));
+    check_status(device_free(s->value_cache));
 }
-
