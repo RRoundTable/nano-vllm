@@ -35,9 +35,31 @@ int sample(Sampler* s, float* logits, int vocab_size, float temperature);
 
 // Global config for visualization
 int g_visualize_paged = 0;
+int g_paged_mode = 0; // Actual Logic Mode
+
+// PagedAttention Globals
+KVCacheManager g_kv_manager;
+BlockTable g_block_table;
 
 void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
     
+    // Scheduler Logic: Allocate new block if needed (Only in Paged Mode)
+    if (g_paged_mode) {
+        int block_size = g_kv_manager.block_size;
+        if (pos % block_size == 0) {
+            // Need a new block for this position
+            int new_block = alloc_block(&g_kv_manager);
+            if (new_block == -1) {
+                printf("Error: Out of KV Cache blocks!\n");
+                exit(1);
+            }
+            int logical_idx = pos / block_size;
+            g_block_table.block_indices[logical_idx] = new_block;
+            g_block_table.num_blocks++;
+            // log_printf("Allocated Block %d for Logical %d\n", new_block, logical_idx);
+        }
+    }
+
     // 1. Embedding
     float* content_row = w->token_embedding_table + token * p->dim;
     cudaCheck(cudaMemcpy(s->x, content_row, p->dim * sizeof(float), cudaMemcpyDeviceToDevice));
@@ -60,13 +82,27 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         apply_rope(s->q, s->k, pos, p->rope_theta, p->head_dim, p->n_heads, p->n_kv_heads);
         
         // d. KV Cache Update
-        update_kv_cache(s->key_cache, s->value_cache, s->k, s->v, 
-                        i, pos, p->max_seq_len, p->n_kv_heads, p->head_dim);
+        if (g_paged_mode) {
+            // Paged Update (Writes to non-contiguous memory)
+            update_kv_cache_paged(&g_kv_manager, &g_block_table, s->k, s->v, 
+                                  i, pos, p->n_kv_heads, p->head_dim);
+        } else {
+            // Naive Update (Writes to contiguous memory)
+            update_kv_cache(s->key_cache, s->value_cache, s->k, s->v, 
+                            i, pos, p->max_seq_len, p->n_kv_heads, p->head_dim);
+        }
         
         // e. Multi-Head Attention
         // out = xb2 (reusing buffer)
-        multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
-                             i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+        if (g_paged_mode) {
+            // Paged Attention (Reads from non-contiguous memory)
+            paged_attention(s->xb2, s->q, &g_kv_manager, &g_block_table, s->att,
+                            i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+        } else {
+            // Naive Attention
+            multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
+                                 i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+        }
         
         // [Visualizer] Show KV Cache Usage for Layer 0
         #ifndef __CUDACC__
@@ -124,6 +160,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--paged") == 0) {
             g_visualize_paged = 1;
+            g_paged_mode = 1; // Enable Actual Logic
         }
     }
 
@@ -141,6 +178,22 @@ int main(int argc, char** argv) {
     load_model(&weights, &config, model_path);
     malloc_run_state(&state, &config);
     
+    // Phase 3: Initialize PagedAttention
+    if (g_paged_mode) {
+        int block_size = 16;
+        // Total blocks = (max_seq_len / block_size) * something ? 
+        // For this demo, let's allocate slightly more than needed for one seq
+        int num_blocks = (config.max_seq_len + block_size - 1) / block_size + 8; 
+        
+        init_kv_cache_manager(&g_kv_manager, block_size, num_blocks, config.n_layers, config.n_kv_heads, config.head_dim);
+        
+        // Init Block Table for the single sequence
+        g_block_table.block_indices = (int*)malloc(num_blocks * sizeof(int));
+        g_block_table.num_blocks = 0;
+        
+        log_printf("PagedAttention Initialized (Block Size: %d, Pool: %d blocks)\n", block_size, num_blocks);
+    }
+    
     // Try to load tokenizer if it exists
     build_tokenizer(&tokenizer, "data/tokenizer.bin", config.vocab_size);
     build_sampler(&sampler, (unsigned long long)time(NULL)); // Seed with time
@@ -150,7 +203,7 @@ int main(int argc, char** argv) {
     
     log_printf("Starting inference for %d steps...\n", steps);
     if (g_visualize_paged) {
-        log_printf("Visualization Mode: Paged KV Cache (Simulated)\n");
+        log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
     } else {
         log_printf("Visualization Mode: Linear KV Cache (Naive)\n");
     }
@@ -210,6 +263,12 @@ int main(int argc, char** argv) {
     free_tokenizer(&tokenizer);
     free_run_state(&state);
     free_ops();
+    
+    if (g_paged_mode) {
+        free_kv_cache_manager(&g_kv_manager);
+        free(g_block_table.block_indices);
+    }
+    
     log_close();
     // free weights...
     

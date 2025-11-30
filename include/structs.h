@@ -49,10 +49,34 @@ typedef struct {
     float* att;    // [n_heads, seq_len]
     float* logits; // [vocab_size]
     
-    // KV Cache
+    // KV Cache (Naive)
     // [n_layers, max_seq_len, n_kv_heads, head_dim]
     float* key_cache;   
     float* value_cache; 
 } RunState;
+
+// ==========================================
+// PagedAttention Structures (Phase 3)
+// ==========================================
+
+typedef struct {
+    int block_size;
+    int num_blocks;
+    int free_blocks_count;
+    int* free_block_indices; // Stack of free block indices
+    
+    // Physical Memory Pool
+    // [num_blocks, block_size, n_kv_heads, head_dim]
+    // We will allocate one huge pool for all layers or per layer?
+    // vLLM usually has one large pool per layer or shared. 
+    // For simplicity in C, let's make it: [n_layers, num_blocks, block_size, n_kv_heads, head_dim]
+    float* pool_k; 
+    float* pool_v;
+} KVCacheManager;
+
+typedef struct {
+    int* block_indices; // [max_blocks_per_seq]
+    int num_blocks;     // Current number of blocks used
+} BlockTable;
 
 #endif // STRUCTS_H
