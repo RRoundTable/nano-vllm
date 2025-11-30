@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <string.h>
 #include "structs.h"
 #include "ops.h"
 #include "nano_cuda.h"
@@ -31,6 +32,9 @@ typedef struct {
 
 void build_sampler(Sampler* s, unsigned long long seed);
 int sample(Sampler* s, float* logits, int vocab_size, float temperature);
+
+// Global config for visualization
+int g_visualize_paged = 0;
 
 void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
     
@@ -64,11 +68,11 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
                              i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
         
-        // [Visualizer] Show Attention Patterns for Layer 0
+        // [Visualizer] Show KV Cache Usage for Layer 0
         #ifndef __CUDACC__
         if (i == 0) {
-            visualize_attention(s->att, p->n_heads, pos, p->max_seq_len);
-            visualize_kv_cache_usage(i, pos, p->max_seq_len);
+            // visualize_attention(s->att, p->n_heads, pos, p->max_seq_len); // Disabled for cleaner output
+            visualize_kv_cache_usage(i, pos, p->max_seq_len, g_visualize_paged);
         }
         #endif
         
@@ -106,7 +110,7 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: %s <model_path> [steps]\n", argv[0]);
+        printf("Usage: %s <model_path> [steps] [--paged]\n", argv[0]);
         return 1;
     }
     
@@ -114,6 +118,13 @@ int main(int argc, char** argv) {
     int steps = 10;
     if (argc >= 3) {
         steps = atoi(argv[2]);
+    }
+    
+    // Parse --paged flag
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--paged") == 0) {
+            g_visualize_paged = 1;
+        }
     }
 
     // Initialize libraries
@@ -138,12 +149,15 @@ int main(int argc, char** argv) {
     int pos = 0;
     
     log_printf("Starting inference for %d steps...\n", steps);
+    if (g_visualize_paged) {
+        log_printf("Visualization Mode: Paged KV Cache (Simulated)\n");
+    } else {
+        log_printf("Visualization Mode: Linear KV Cache (Naive)\n");
+    }
+
     clock_t start = clock();
     
     // Buffer for accumulating text
-    // Allocate enough space (steps * 100) roughly, or just dynamic.
-    // For Phase 1 simple demo, fixed large buffer is fine.
-    // Typical token len is < 10 chars. 50 steps * 10 = 500.
     char* text_buffer = (char*)malloc(steps * 100 + 1024);
     text_buffer[0] = '\0';
     
