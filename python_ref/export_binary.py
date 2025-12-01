@@ -37,11 +37,60 @@ import argparse
 import struct
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from pathlib import Path
 
 
-def export_llama_binary(model_name: str, output_path: str):
+def export_tokenizer(tokenizer, output_path: str, vocab_size: int):
+    """
+    Export HuggingFace tokenizer to llama2.c binary format.
+    
+    Binary Format (little-endian):
+    - max_token_length: int32
+    - For each token (vocab_size):
+        - score: float32
+        - length: int32
+        - token_bytes: byte array (UTF-8 encoded)
+    """
+    print(f"\nExporting tokenizer to {output_path}...")
+    
+    # Collect all tokens
+    tokens = []
+    max_len = 0
+    
+    for i in range(vocab_size):
+        token_str = tokenizer.convert_ids_to_tokens(i)
+        if token_str is None:
+            token_str = f"<unk_{i}>"
+        
+        # Handle special SentencePiece tokens
+        # Replace '▁' (U+2581) with space for readability
+        if '▁' in token_str:
+            token_str = token_str.replace('▁', ' ')
+        
+        token_bytes = token_str.encode('utf-8')
+        tokens.append(token_bytes)
+        max_len = max(max_len, len(token_bytes))
+    
+    # Write binary file
+    with open(output_path, 'wb') as f:
+        # Write max token length
+        f.write(struct.pack('i', max_len))
+        
+        # Write each token
+        for i, token_bytes in enumerate(tokens):
+            # Score: use negative index as default (lower = more common)
+            score = -float(i)
+            f.write(struct.pack('f', score))
+            
+            # Token length and bytes
+            f.write(struct.pack('i', len(token_bytes)))
+            f.write(token_bytes)
+    
+    print(f"✅ Tokenizer exported: {vocab_size} tokens, max_len={max_len}")
+
+
+def export_llama_binary(model_name: str, output_path: str, export_tokenizer_flag: bool = True):
     """
     Load Hugging Face Llama model and export to binary format.
     """
@@ -147,9 +196,16 @@ def export_llama_binary(model_name: str, output_path: str):
             write_tensor(model.model.embed_tokens.weight.t(), "lm_head")
     
     file_size = output_path.stat().st_size / (1024**2)
-    print(f"\n✅ Export complete!")
+    print(f"\n✅ Model export complete!")
     print(f"   Output: {output_path}")
     print(f"   Size: {file_size:.2f} MB")
+    
+    # Export tokenizer
+    if export_tokenizer_flag:
+        tokenizer_path = output_path.parent / "tokenizer.bin"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        export_tokenizer(tokenizer, str(tokenizer_path), vocab_size)
+        print(f"   Tokenizer: {tokenizer_path}")
 
 
 def main():
@@ -166,6 +222,11 @@ def main():
         default='data/model.bin',
         help='Output binary file path'
     )
+    parser.add_argument(
+        '--no-tokenizer',
+        action='store_true',
+        help='Skip tokenizer export'
+    )
     
     args = parser.parse_args()
     
@@ -173,7 +234,7 @@ def main():
     print("Llama Binary Export Tool")
     print("=" * 60)
     
-    export_llama_binary(args.model, args.output)
+    export_llama_binary(args.model, args.output, export_tokenizer_flag=not args.no_tokenizer)
 
 
 if __name__ == '__main__':

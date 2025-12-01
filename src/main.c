@@ -194,8 +194,22 @@ int main(int argc, char** argv) {
         log_printf("PagedAttention Initialized (Block Size: %d, Pool: %d blocks)\n", block_size, num_blocks);
     }
     
-    // Try to load tokenizer if it exists
-    build_tokenizer(&tokenizer, "data/tokenizer.bin", config.vocab_size);
+    // Build tokenizer path from model path
+    // e.g., "python_ref/data/model.bin" -> "python_ref/data/tokenizer.bin"
+    char tokenizer_path[1024];
+    const char* last_slash = strrchr(model_path, '/');
+    if (last_slash != NULL) {
+        // Copy directory path
+        size_t dir_len = last_slash - model_path + 1;
+        strncpy(tokenizer_path, model_path, dir_len);
+        tokenizer_path[dir_len] = '\0';
+        strcat(tokenizer_path, "tokenizer.bin");
+    } else {
+        // No directory separator, assume current directory
+        strcpy(tokenizer_path, "tokenizer.bin");
+    }
+    
+    build_tokenizer(&tokenizer, tokenizer_path, config.vocab_size);
     build_sampler(&sampler, (unsigned long long)time(NULL)); // Seed with time
     
     int token = 1; // BOS token
