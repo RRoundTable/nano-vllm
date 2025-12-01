@@ -31,7 +31,10 @@ OBJS_CPU_KERNELS = $(SRCS_CPU_KERNELS:.c=.o)
 all: $(TARGET_CPU)
 
 # CPU Build
-cpu: $(TARGET_CPU)
+.PHONY: cpu
+cpu:
+	$(MAKE) clean
+	$(MAKE) $(TARGET_CPU)
 
 $(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS_CPU)
