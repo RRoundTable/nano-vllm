@@ -45,5 +45,8 @@ gpu: $(TARGET_GPU)
 $(TARGET_GPU): $(SRCS_C) $(SRCS_CU)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $^ -lcublas
 
+setup:
+	./setup_models.sh
+
 clean:
 	rm -f $(TARGET_CPU) $(TARGET_GPU) src/*.o kernels/cpu/*.o *.log
