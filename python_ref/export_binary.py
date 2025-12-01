@@ -140,12 +140,11 @@ def export_llama_binary(model_name: str, output_path: str, export_tokenizer_flag
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(output_path, 'wb') as f:
-        # Write header
-        print("\nWriting header...")
+        # Write header (legacy llama2.c format)
+        print("\nWriting header (legacy format)...")
         header = struct.pack(
-            'iiiiiiiif',
-            dim, n_layers, n_heads, n_kv_heads,
-            vocab_size, max_seq_len, hidden_dim, head_dim, rope_theta
+            'iiiiiii',
+            dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len
         )
         f.write(header)
         

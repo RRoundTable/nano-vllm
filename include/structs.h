@@ -5,12 +5,13 @@
 
 typedef struct {
     int dim;
+    int hidden_dim;
     int n_layers;
     int n_heads;
     int n_kv_heads;
     int vocab_size;
     int max_seq_len;
-    int hidden_dim;
+    // Derived or extended
     int head_dim;
     float rope_theta;
 } Config;

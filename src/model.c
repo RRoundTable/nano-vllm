@@ -86,9 +86,11 @@ void load_model(Weights* w, Config* p, const char* checkpoint_path) {
 
     // Read header
     if (fread(p, sizeof(int), 7, f) != 7) { exit(1); }
-    // Read head_dim (int) and rope_theta (float)
-    if (fread(&p->head_dim, sizeof(int), 1, f) != 1) { exit(1); }
-    if (fread(&p->rope_theta, sizeof(float), 1, f) != 1) { exit(1); }
+    
+    // Derive head_dim
+    p->head_dim = p->dim / p->n_heads;
+    // Default rope_theta for now (llama2.c legacy format doesn't have it)
+    p->rope_theta = 10000.0f; 
 
     printf("Model Config:\n");
     printf("  dim: %d\n", p->dim);
