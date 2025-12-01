@@ -38,7 +38,7 @@ void rms_norm(float* out, float* in, float* weight, int size, float eps) {
 
 void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
     // out = in @ weight
-    // in: [in_dim], weight: [in_dim, out_dim] (row-major)
+    // in: [in_dim], weight: [out_dim, in_dim] (row-major)
     // out: [out_dim]
     
     // Parallelize outer loop (output dimension)
@@ -48,7 +48,7 @@ void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
     for (int i = 0; i < out_dim; i++) {
         float val = 0.0f;
         for (int j = 0; j < in_dim; j++) {
-            val += in[j] * weight[j * out_dim + i];
+            val += in[j] * weight[i * in_dim + j];
         }
         out[i] = val;
     }
@@ -59,33 +59,26 @@ void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
 // ===========================================================================
 
 void apply_rope(float* q, float* k, int pos, float theta, int head_dim, int n_heads, int n_kv_heads) {
-    for (int h = 0; h < n_heads; h++) {
-        for (int i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / head_dim);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            
-            int q_idx = h * head_dim + i;
-            float q0 = q[q_idx];
-            float q1 = q[q_idx+1];
-            q[q_idx]   = q0 * fcr - q1 * fci;
-            q[q_idx+1] = q0 * fci + q1 * fcr;
+    for (int i = 0; i < head_dim; i+=2) {
+        float freq = 1.0f / powf(theta, i / (float)head_dim);
+        float val = pos * freq;
+        float fcr = cosf(val);
+        float fci = sinf(val);
+        
+        for (int h = 0; h < n_heads; h++) {
+            float* vec = q + h * head_dim;
+            float v0 = vec[i];
+            float v1 = vec[i+1];
+            vec[i]   = v0 * fcr - v1 * fci;
+            vec[i+1] = v0 * fci + v1 * fcr;
         }
-    }
-    
-    for (int h = 0; h < n_kv_heads; h++) {
-        for (int i = 0; i < head_dim; i += 2) {
-            float freq = 1.0f / powf(theta, (float)i / head_dim);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            
-            int k_idx = h * head_dim + i;
-            float k0 = k[k_idx];
-            float k1 = k[k_idx+1];
-            k[k_idx]   = k0 * fcr - k1 * fci;
-            k[k_idx+1] = k0 * fci + k1 * fcr;
+        
+        for (int h = 0; h < n_kv_heads; h++) {
+            float* vec = k + h * head_dim;
+            float v0 = vec[i];
+            float v1 = vec[i+1];
+            vec[i]   = v0 * fcr - v1 * fci;
+            vec[i+1] = v0 * fci + v1 * fcr;
         }
     }
 }

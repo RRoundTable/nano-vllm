@@ -176,10 +176,11 @@ def export_llama_binary(model_name: str, output_path: str, export_tokenizer_flag
             write_tensor(layer.self_attn.o_proj.weight.t(), f"layer{i}.wo")
             
             # FFN
+            # Write order: gate, down, up (matches llama2.c)
             write_tensor(layer.post_attention_layernorm.weight, f"layer{i}.rms_ffn_weight")
             write_tensor(layer.mlp.gate_proj.weight.t(), f"layer{i}.w_gate")
-            write_tensor(layer.mlp.up_proj.weight.t(), f"layer{i}.w_up")
             write_tensor(layer.mlp.down_proj.weight.t(), f"layer{i}.w_down")
+            write_tensor(layer.mlp.up_proj.weight.t(), f"layer{i}.w_up")
         
         # Final norm
         print("\nWriting final norm...")

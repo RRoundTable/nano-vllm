@@ -80,4 +80,9 @@ typedef struct {
     int num_blocks;     // Current number of blocks used
 } BlockTable;
 
+typedef struct {
+    float prob;
+    int index;
+} ProbIndex; // struct used when sorting probabilities during top-p sampling
+
 #endif // STRUCTS_H

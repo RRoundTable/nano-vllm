@@ -3,6 +3,7 @@
 #include <math.h>
 #include <time.h>
 #include <string.h>
+#include <ctype.h>
 #include "structs.h"
 #include "ops.h"
 #include "backend.h"
@@ -13,25 +14,38 @@ void load_model(Weights* w, Config* p, const char* checkpoint_path);
 void malloc_run_state(RunState* s, Config* p);
 void free_run_state(RunState* s);
 
+typedef struct {
+    char *str;
+    int id;
+} TokenIndex;
+
 // Tokenizer (Minimal)
 typedef struct {
     char** vocab;
     float* vocab_scores;
+    TokenIndex *sorted_vocab;
     int vocab_size;
+    unsigned int max_token_length;
     unsigned char byte_pieces[512];
 } Tokenizer;
 
 void build_tokenizer(Tokenizer* t, const char* tokenizer_path, int vocab_size);
 void free_tokenizer(Tokenizer* t);
 const char* decode_token(Tokenizer* t, int token);
+void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens);
+
 
 // Sampler
 typedef struct {
     unsigned long long state;
+    float temperature;
+    float topp;
+    ProbIndex* probindex; // buffer used in top-p sampling
+    int vocab_size;
 } Sampler;
 
-void build_sampler(Sampler* s, unsigned long long seed);
-int sample(Sampler* s, float* logits, int vocab_size, float temperature);
+void build_sampler(Sampler* s, int vocab_size, float temperature, float topp, unsigned long long seed);
+int sample(Sampler* s, float* logits);
 
 // Global config for visualization
 int g_visualize_paged = 0;
@@ -151,18 +165,48 @@ int main(int argc, char** argv) {
     }
     
     const char* model_path = argv[1];
-    int steps = 10;
-    if (argc >= 3) {
-        steps = atoi(argv[2]);
-    }
+    int steps = 256;
+    float temperature = 1.0f;
+    float topp = 0.9f;
+
+    // poor man's C argparse so we can override the defaults above from the command line
+    // Usage: ./run <model_path> [options]
+    // Options: -t <temp> -p <topp> -n <steps>
     
-    // Parse --paged flag
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--paged") == 0) {
-            g_visualize_paged = 1;
-            g_paged_mode = 1; // Enable Actual Logic
+    char *prompt = NULL;
+    
+    for (int i = 2; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            if (argv[i][1] == 't') { 
+                if (i + 1 < argc) { temperature = atof(argv[i + 1]); i++; }
+            }
+            else if (argv[i][1] == 'p') { 
+                if (i + 1 < argc) { topp = atof(argv[i + 1]); i++; }
+            }
+            else if (argv[i][1] == 'n') { 
+                if (i + 1 < argc) { steps = atoi(argv[i + 1]); i++; }
+            }
+            else if (argv[i][1] == 'i') { 
+                if (i + 1 < argc) { prompt = argv[i + 1]; i++; }
+            }
+            else if (strcmp(argv[i], "--paged") == 0) {
+                g_visualize_paged = 1;
+                g_paged_mode = 1;
+            }
+        } else {
+            // Compatibility with old positional arg [steps]
+            // If it's just a number and not an option value
+             if (i == 2 && isdigit(argv[i][0])) {
+                steps = atoi(argv[i]);
+            }
         }
     }
+    
+    // Validation
+    if (temperature < 0.0) temperature = 0.0;
+    if (topp < 0.0 || 1.0 < topp) topp = 0.9;
+    if (steps < 0) steps = 0;
+
 
     // Initialize libraries
     log_init("nano_vllm.log");
@@ -210,12 +254,19 @@ int main(int argc, char** argv) {
     }
     
     build_tokenizer(&tokenizer, tokenizer_path, config.vocab_size);
-    build_sampler(&sampler, (unsigned long long)time(NULL)); // Seed with time
+    build_sampler(&sampler, config.vocab_size, temperature, topp, (unsigned long long)time(NULL)); // Seed with time
     
-    int token = 1; // BOS token
+    // encode the (string) prompt into tokens sequence
+    int num_prompt_tokens = 0;
+    // +3 for '\0', ?BOS, ?EOS
+    if (prompt == NULL) { prompt = ""; }
+    int* prompt_tokens = (int*)malloc((strlen(prompt) + 3) * sizeof(int)); 
+    encode(&tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+    
+    int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;
     
-    log_printf("Starting inference for %d steps...\n", steps);
+    log_printf("Starting inference for %d steps (temp=%f, topp=%f)...\n", steps, temperature, topp);
     if (g_visualize_paged) {
         log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
     } else {
@@ -228,25 +279,35 @@ int main(int argc, char** argv) {
     char* text_buffer = (char*)malloc(steps * 100 + 1024);
     text_buffer[0] = '\0';
     
+    int next_token;
+    
     for (pos = 0; pos < steps; pos++) {
         transformer(token, pos, &config, &state, &weights);
         
-        // Copy logits to host to find max
-        float* host_logits;
-        #ifdef __CUDACC__
-            host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-            check_status(device_memcpy(host_logits, state.logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
-        #else
-            // In CPU mode, state.logits is already on host
-            host_logits = state.logits;
-        #endif
-        
-        // Sample next token (Temperature = 1.0f)
-        int next_token = sample(&sampler, host_logits, config.vocab_size, 1.0f);
-        
-        #ifdef __CUDACC__
-            free(host_logits);
-        #endif
+        // Advance state machine
+        if (pos < num_prompt_tokens - 1) {
+            // if we are still processing the input prompt, force the next prompt token
+            next_token = prompt_tokens[pos + 1];
+        } else {
+            // otherwise sample the next token from the logits
+            
+            // Copy logits to host to find max
+            float* host_logits;
+            #ifdef __CUDACC__
+                host_logits = (float*)malloc(config.vocab_size * sizeof(float));
+                check_status(device_memcpy(host_logits, state.logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
+            #else
+                // In CPU mode, state.logits is already on host
+                host_logits = state.logits;
+            #endif
+            
+            // Sample next token
+            next_token = sample(&sampler, host_logits);
+            
+            #ifdef __CUDACC__
+                free(host_logits);
+            #endif
+        }
         
         const char* text = decode_token(&tokenizer, next_token);
         // Print real-time token (optional, maybe just visualizer?)
@@ -269,6 +330,8 @@ int main(int argc, char** argv) {
     log_printf("==================================================\n");
     
     free(text_buffer);
+    free(prompt_tokens);
+
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
