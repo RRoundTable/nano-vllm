@@ -43,6 +43,6 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
 // Visualization
 void visualize_attention(float* att, int n_heads, int pos, int max_seq_len);
 // mode: 0 = Linear (Naive), 1 = Paged (Block-based)
-void visualize_kv_cache_usage(int layer, int pos, int max_seq_len, int mode);
+void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr, int max_seq_len, int mode);
 
 #endif

@@ -81,6 +81,18 @@ typedef struct {
 } BlockTable;
 
 typedef struct {
+    int id;
+    int active;       // 1 if generating, 0 if finished
+    int pos;          // Current position (tokens generated so far)
+    int seq_len;      // Total tokens to generate (prompt + steps)
+    int current_token;// Last generated token
+    int* prompt_tokens;
+    int num_prompt_tokens;
+    RunState* state;  // Dedicated activation memory for this seq
+    BlockTable table; // Dedicated block table for this seq
+} Sequence;
+
+typedef struct {
     float prob;
     int index;
 } ProbIndex; // struct used when sorting probabilities during top-p sampling

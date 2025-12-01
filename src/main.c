@@ -53,9 +53,8 @@ int g_paged_mode = 0; // Actual Logic Mode
 
 // PagedAttention Globals
 KVCacheManager g_kv_manager;
-BlockTable g_block_table;
 
-void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
+void transformer(int token, int pos, Config* p, RunState* s, Weights* w, BlockTable* bt) {
     
     // Scheduler Logic: Allocate new block if needed (Only in Paged Mode)
     if (g_paged_mode) {
@@ -68,8 +67,10 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
                 exit(1);
             }
             int logical_idx = pos / block_size;
-            g_block_table.block_indices[logical_idx] = new_block;
-            g_block_table.num_blocks++;
+            // Resize block_indices if needed? (In this simple C code, we assume fixed max size or pre-allocated enough)
+            // For this demo, we pre-allocated enough in main.
+            bt->block_indices[logical_idx] = new_block;
+            bt->num_blocks++;
             // log_printf("Allocated Block %d for Logical %d\n", new_block, logical_idx);
         }
     }
@@ -98,7 +99,7 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         // d. KV Cache Update
         if (g_paged_mode) {
             // Paged Update (Writes to non-contiguous memory)
-            update_kv_cache_paged(&g_kv_manager, &g_block_table, s->k, s->v, 
+            update_kv_cache_paged(&g_kv_manager, bt, s->k, s->v, 
                                   i, pos, p->n_kv_heads, p->head_dim);
         } else {
             // Naive Update (Writes to contiguous memory)
@@ -110,21 +111,13 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w) {
         // out = xb2 (reusing buffer)
         if (g_paged_mode) {
             // Paged Attention (Reads from non-contiguous memory)
-            paged_attention(s->xb2, s->q, &g_kv_manager, &g_block_table, s->att,
+            paged_attention(s->xb2, s->q, &g_kv_manager, bt, s->att,
                             i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
         } else {
             // Naive Attention
             multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
                                  i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
         }
-        
-        // [Visualizer] Show KV Cache Usage for Layer 0
-        #ifndef __CUDACC__
-        if (i == 0) {
-            // visualize_attention(s->att, p->n_heads, pos, p->max_seq_len); // Disabled for cleaner output
-            visualize_kv_cache_usage(i, pos, p->max_seq_len, g_visualize_paged);
-        }
-        #endif
         
         // f. Output Projection
         // xb2 [n_heads * head_dim] @ wo [n_heads * head_dim, dim] -> xb [dim] (reuse xb)
@@ -165,7 +158,7 @@ int main(int argc, char** argv) {
     }
     
     const char* model_path = argv[1];
-    int steps = 256;
+    int steps = 64; // Default reduced for multi-seq demo
     float temperature = 1.0f;
     float topp = 0.9f;
 
@@ -173,7 +166,8 @@ int main(int argc, char** argv) {
     // Usage: ./run <model_path> [options]
     // Options: -t <temp> -p <topp> -n <steps>
     
-    char *prompt = NULL;
+    // Multi-sequence Prompts
+    char *user_prompt = NULL; // If user provides specific prompt
     
     for (int i = 2; i < argc; i++) {
         if (argv[i][0] == '-') {
@@ -187,7 +181,7 @@ int main(int argc, char** argv) {
                 if (i + 1 < argc) { steps = atoi(argv[i + 1]); i++; }
             }
             else if (argv[i][1] == 'i') { 
-                if (i + 1 < argc) { prompt = argv[i + 1]; i++; }
+                if (i + 1 < argc) { user_prompt = argv[i + 1]; i++; }
             }
             else if (strcmp(argv[i], "--paged") == 0) {
                 g_visualize_paged = 1;
@@ -195,7 +189,6 @@ int main(int argc, char** argv) {
             }
         } else {
             // Compatibility with old positional arg [steps]
-            // If it's just a number and not an option value
              if (i == 2 && isdigit(argv[i][0])) {
                 steps = atoi(argv[i]);
             }
@@ -214,59 +207,90 @@ int main(int argc, char** argv) {
 
     Config config;
     Weights weights;
-    RunState state;
+    // RunState state; // REPLACED by Sequence.state
     Tokenizer tokenizer;
     Sampler sampler;
 
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
-    malloc_run_state(&state, &config);
+    
+    // Define Batches
+    int BATCH_SIZE = 4;
+    // If user provided a prompt, use it for first seq, else default.
+    char* prompts[4] = {
+        user_prompt ? user_prompt : "Hello, my name is",
+        "The quick brown fox jumps over",
+        "Once upon a time in a distant land",
+        "To be or not to be, that is"
+    };
+    // Different lengths for interest
+    int steps_per_seq[4] = { steps, steps + 20, steps - 10, steps + 50 }; 
+    if (steps_per_seq[2] < 10) steps_per_seq[2] = 10;
+    
+    // Initialize Sequences
+    Sequence seqs[4];
+    
+    for(int i=0; i<BATCH_SIZE; i++) {
+        seqs[i].id = i;
+        seqs[i].active = 1;
+        seqs[i].pos = 0;
+        seqs[i].seq_len = steps_per_seq[i]; // Total steps to generate
+        
+        // Alloc State
+        seqs[i].state = (RunState*)malloc(sizeof(RunState));
+        malloc_run_state(seqs[i].state, &config);
+        
+        // BlockTable Init (Wait until paged manager init)
+    }
     
     // Phase 3: Initialize PagedAttention
     if (g_paged_mode) {
         int block_size = 16;
-        // Total blocks = (max_seq_len / block_size) * something ? 
-        // For this demo, let's allocate slightly more than needed for one seq
-        int num_blocks = (config.max_seq_len + block_size - 1) / block_size + 8; 
+        // Total blocks = Sum of max needs for all seqs
+        int total_needed_blocks = 0;
+        for(int i=0; i<BATCH_SIZE; i++) {
+            // Approx max len = max_seq_len (or actual seq_len)
+            // Let's reserve enough for max_seq_len for safety in demo
+            int needed = (config.max_seq_len + block_size - 1) / block_size;
+            total_needed_blocks += needed;
+        }
         
-        init_kv_cache_manager(&g_kv_manager, block_size, num_blocks, config.n_layers, config.n_kv_heads, config.head_dim);
+        init_kv_cache_manager(&g_kv_manager, block_size, total_needed_blocks, config.n_layers, config.n_kv_heads, config.head_dim);
         
-        // Init Block Table for the single sequence
-        g_block_table.block_indices = (int*)malloc(num_blocks * sizeof(int));
-        g_block_table.num_blocks = 0;
+        // Init Block Tables
+        for(int i=0; i<BATCH_SIZE; i++) {
+            int max_blocks = (config.max_seq_len + block_size - 1) / block_size;
+            seqs[i].table.block_indices = (int*)malloc(max_blocks * sizeof(int));
+            seqs[i].table.num_blocks = 0;
+        }
         
-        log_printf("PagedAttention Initialized (Block Size: %d, Pool: %d blocks)\n", block_size, num_blocks);
+        log_printf("PagedAttention Initialized (Block Size: %d, Pool: %d blocks)\n", block_size, total_needed_blocks);
     }
     
-    // Build tokenizer path from model path
-    // e.g., "python_ref/data/model.bin" -> "python_ref/data/tokenizer.bin"
+    // Build tokenizer path
     char tokenizer_path[1024];
     const char* last_slash = strrchr(model_path, '/');
     if (last_slash != NULL) {
-        // Copy directory path
         size_t dir_len = last_slash - model_path + 1;
         strncpy(tokenizer_path, model_path, dir_len);
         tokenizer_path[dir_len] = '\0';
         strcat(tokenizer_path, "tokenizer.bin");
     } else {
-        // No directory separator, assume current directory
         strcpy(tokenizer_path, "tokenizer.bin");
     }
     
     build_tokenizer(&tokenizer, tokenizer_path, config.vocab_size);
     build_sampler(&sampler, config.vocab_size, temperature, topp, (unsigned long long)time(NULL)); // Seed with time
     
-    // encode the (string) prompt into tokens sequence
-    int num_prompt_tokens = 0;
-    // +3 for '\0', ?BOS, ?EOS
-    if (prompt == NULL) { prompt = ""; }
-    int* prompt_tokens = (int*)malloc((strlen(prompt) + 3) * sizeof(int)); 
-    encode(&tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
-    
-    int token = prompt_tokens[0]; // kick off with the first token in the prompt
-    int pos = 0;
-    
-    log_printf("Starting inference for %d steps (temp=%f, topp=%f)...\n", steps, temperature, topp);
+    // Encode Prompts
+    for(int i=0; i<BATCH_SIZE; i++) {
+        // +3 for '\0', ?BOS, ?EOS
+        seqs[i].prompt_tokens = (int*)malloc((strlen(prompts[i]) + 3) * sizeof(int)); 
+        encode(&tokenizer, prompts[i], 1, 0, seqs[i].prompt_tokens, &seqs[i].num_prompt_tokens);
+        seqs[i].current_token = seqs[i].prompt_tokens[0]; // Start token
+    }
+
+    log_printf("Starting Multi-Sequence Inference (%d sequences)...\n", BATCH_SIZE);
     if (g_visualize_paged) {
         log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
     } else {
@@ -275,79 +299,93 @@ int main(int argc, char** argv) {
 
     clock_t start = clock();
     
-    // Buffer for accumulating text
-    char* text_buffer = (char*)malloc(steps * 100 + 1024);
-    text_buffer[0] = '\0';
+    int any_active = 1;
+    int global_step = 0;
     
-    int next_token;
-    
-    for (pos = 0; pos < steps; pos++) {
-        transformer(token, pos, &config, &state, &weights);
+    // Main Batch Loop
+    while (any_active) {
+        any_active = 0;
+        log_printf("\n--- Step %d ---\n", global_step);
         
-        // Advance state machine
-        if (pos < num_prompt_tokens - 1) {
-            // if we are still processing the input prompt, force the next prompt token
-            next_token = prompt_tokens[pos + 1];
-        } else {
-            // otherwise sample the next token from the logits
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            if (!seqs[i].active) continue;
+            any_active = 1;
             
-            // Copy logits to host to find max
-            float* host_logits;
-            #ifdef __CUDACC__
-                host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-                check_status(device_memcpy(host_logits, state.logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
-            #else
-                // In CPU mode, state.logits is already on host
-                host_logits = state.logits;
-            #endif
+            // Run Transformer
+            // Note: For naive mode, update_kv_cache uses 's->key_cache' inside RunState, so no extra block table needed.
+            // But for Paged, we pass seqs[i].table.
+            BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
+            transformer(seqs[i].current_token, seqs[i].pos, &config, seqs[i].state, &weights, bt_ptr);
             
-            // Sample next token
-            next_token = sample(&sampler, host_logits);
+            // Next Token Logic
+            int next_token;
+            if (seqs[i].pos < seqs[i].num_prompt_tokens - 1) {
+                next_token = seqs[i].prompt_tokens[seqs[i].pos + 1];
+            } else {
+                // Sample
+                float* host_logits;
+                #ifdef __CUDACC__
+                    host_logits = (float*)malloc(config.vocab_size * sizeof(float));
+                    check_status(device_memcpy(host_logits, seqs[i].state->logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
+                #else
+                    host_logits = seqs[i].state->logits;
+                #endif
+                
+                next_token = sample(&sampler, host_logits);
+                
+                #ifdef __CUDACC__
+                    free(host_logits);
+                #endif
+            }
             
-            #ifdef __CUDACC__
-                free(host_logits);
-            #endif
+            // Print
+            const char* text = decode_token(&tokenizer, next_token);
+            log_printf("[Seq %d]: %s\n", i, text);
+            
+            // Update State
+            seqs[i].current_token = next_token;
+            seqs[i].pos++;
+            
+            // Check Finish
+            // Use seq_len as generation limit (simple)
+            if (seqs[i].pos >= seqs[i].seq_len) {
+                seqs[i].active = 0;
+                log_printf("[Seq %d] FINISHED.\n", i);
+            }
         }
         
-        const char* text = decode_token(&tokenizer, next_token);
-        // Print real-time token (optional, maybe just visualizer?)
-        // We keep printing it so user sees progress.
-        log_printf("%s", text);
-        fflush(stdout);
-        
-        // Accumulate
-        strcat(text_buffer, text);
-        
-        token = next_token;
+        // Visualize Memory State (Once per step, after all seqs updated)
+        if (any_active && global_step % 1 == 0) { // Visualize every step
+             #ifndef __CUDACC__
+             visualize_kv_cache_usage(seqs, BATCH_SIZE, &g_kv_manager, config.max_seq_len, g_visualize_paged);
+             #endif
+        }
+        global_step++;
     }
-    log_printf("\n\n");
     
-    // Print accumulated text
-    log_printf("==================================================\n");
-    log_printf("Generated Text:\n");
-    log_printf("==================================================\n");
-    log_printf("%s\n", text_buffer);
-    log_printf("==================================================\n");
-    
-    free(text_buffer);
-    free(prompt_tokens);
-
+    log_printf("\nAll sequences finished.\n");
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    log_printf("Time: %.2fs, %.2f tok/s\n", time_spent, steps / time_spent);
+    log_printf("Time: %.2fs\n", time_spent);
 
+    // Cleanup
     free_tokenizer(&tokenizer);
-    free_run_state(&state);
+    for(int i=0; i<BATCH_SIZE; i++) {
+        free_run_state(seqs[i].state);
+        free(seqs[i].state);
+        free(seqs[i].prompt_tokens);
+        if (g_paged_mode) {
+            free(seqs[i].table.block_indices);
+        }
+    }
     free_ops();
     
     if (g_paged_mode) {
         free_kv_cache_manager(&g_kv_manager);
-        free(g_block_table.block_indices);
     }
     
     log_close();
-    // free weights...
     
     return 0;
 }

@@ -61,73 +61,67 @@ void visualize_attention(float* att, int n_heads, int pos, int max_seq_len) {
     log_printf("\n");
 }
 
-// Mode: 0 = Linear (Naive) Fragmentation Demo, 1 = Paged (Block-based) Fragmentation Demo
-void visualize_kv_cache_usage(int layer, int pos, int max_seq_len, int mode) {
-    if (layer != 0) return; // Only show for layer 0 to avoid spam
-    
-    // Fragmentation Demo: Simulate a memory arena with multiple requests
-    // Let's assume we have 4 requests running concurrently to show the effect clearly.
-    // Req 0: The actual current request (pos + 1 tokens)
-    // Req 1: A finished short request (e.g., 50 tokens)
-    // Req 2: A long request (e.g., 200 tokens)
-    // Req 3: A new request (e.g., 10 tokens)
-    
-    int req_lens[4] = { pos + 1, 50, 200, 10 };
-    int num_reqs = 4;
-    
-    log_printf("\n[Visualizer] Memory Breakdown (Mode: %s)\n", mode == 1 ? "Paged" : "Naive");
-    
+// Mode: 0 = Linear (Naive), 1 = Paged (Block-based)
+void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr, int max_seq_len, int mode) {
+    // Calculate real stats
     int total_used = 0;
-    for(int i=0; i<num_reqs; i++) total_used += req_lens[i];
+    for (int i = 0; i < num_seqs; i++) {
+        total_used += (seqs[i].pos + 1);
+    }
+
+    log_printf("\n[Visualizer] Memory Breakdown (Mode: %s)\n", mode == 1 ? "Paged" : "Naive");
 
     if (mode == 1) {
-        // Paged View: 
-        // - Used: Green
-        // - Reserved: None (0)
-        // - Internal Frag: Yellow (Leftover in last block)
-        int block_size = 16;
-        int total_alloc = 0;
-        int internal_frag = 0;
+        // Paged View
+        int block_size = mgr->block_size;
+        int total_blocks = mgr->num_blocks;
+        int total_alloc = total_blocks * block_size; // Total physical capacity
         
-        for(int i=0; i<num_reqs; i++) {
-            int blocks = (req_lens[i] + block_size - 1) / block_size;
-            int alloc = blocks * block_size;
-            total_alloc += alloc;
-            internal_frag += (alloc - req_lens[i]);
+        int used_blocks = 0;
+        for (int i = 0; i < num_seqs; i++) {
+            used_blocks += seqs[i].table.num_blocks;
         }
+        int allocated_mem = used_blocks * block_size;
+        int internal_frag = allocated_mem - total_used;
+        int free_mem = total_alloc - allocated_mem;
         
         log_printf("Reqs: ");
-        for(int i=0; i<num_reqs; i++) {
-            int blocks = (req_lens[i] + block_size - 1) / block_size;
-            log_printf("[Req%d:%d Blks] ", i, blocks);
+        for(int i=0; i<num_seqs; i++) {
+            log_printf("[Req%d:%d Blks] ", i, seqs[i].table.num_blocks);
         }
         log_printf("\n\n");
 
         // Visualization Bar
-        int total_slots = total_alloc; // Just show allocated space
         int bar_width = 50;
-        int used_chars = (int)((float)total_used / total_slots * bar_width);
-        int frag_chars = bar_width - used_chars;
+        // Normalized to Total Physical Pool Size
+        float scale = (float)bar_width / total_alloc;
         
-        log_printf("Memory Map:\n[");
+        int used_chars = (int)(total_used * scale);
+        int frag_chars = (int)(internal_frag * scale);
+        int free_chars = (int)(free_mem * scale);
+        
+        // Adjust rounding
+        if (used_chars + frag_chars + free_chars < bar_width) free_chars = bar_width - (used_chars + frag_chars);
+
+        log_printf("Memory Map (Total Pool: %d blocks = %d slots):\n[", total_blocks, total_alloc);
         for(int i=0; i<used_chars; i++) log_printf(C_GREEN "#" C_RESET);
         for(int i=0; i<frag_chars; i++) log_printf(C_YELLOW "." C_RESET);
+        for(int i=0; i<free_chars; i++) log_printf(C_GRAY "_" C_RESET);
         log_printf("]\n");
         
         log_printf("1. Used (Actual Data)        : %d (%.1f%%)\n", total_used, (float)total_used/total_alloc*100);
-        log_printf("2. Reserved (Future Tokens)  : 0 (0.0%%)\n");
-        log_printf("3. Internal Frag (Last Page) : " C_YELLOW "%d (%.1f%%)" C_RESET "\n", internal_frag, (float)internal_frag/total_alloc*100);
-        
+        log_printf("2. Internal Frag (Last Page) : " C_YELLOW "%d (%.1f%%)" C_RESET "\n", internal_frag, (float)internal_frag/total_alloc*100);
+        log_printf("3. Free (Available Blocks)   : %d (%.1f%%)\n", free_mem, (float)free_mem/total_alloc*100);
+
     } else {
-        // Naive View:
-        // - Used: Green
-        // - Reserved: Red (Huge waste)
-        // - Internal Frag: None (Included in Reserved logic for Contiguous)
-        int total_alloc = num_reqs * max_seq_len;
+        // Naive View
+        // In naive mode, each sequence grabs 'max_seq_len' immediately.
+        // We simulate this simply by multiplying num_seqs * max_seq_len
+        int total_alloc = num_seqs * max_seq_len; 
         int reserved_waste = total_alloc - total_used;
         
         log_printf("Reqs: ");
-        for(int i=0; i<num_reqs; i++) log_printf("[Req%d:%d/%d] ", i, req_lens[i], max_seq_len);
+        for(int i=0; i<num_seqs; i++) log_printf("[Req%d:%d/%d] ", i, seqs[i].pos + 1, max_seq_len);
         log_printf("\n\n");
 
         // Visualization Bar

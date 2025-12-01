@@ -5,6 +5,8 @@
 #include "structs.h"
 #include "backend.h"
 
+extern int g_paged_mode;
+
 // FP16 to FP32 conversion
 // Reference: https://stackoverflow.com/questions/1659440/32-bit-to-16-bit-floating-point-conversion
 static inline float fp16_to_fp32(uint16_t h) {
@@ -265,13 +267,6 @@ void load_model(Weights* w, Config* p, const char* checkpoint_path) {
     
     if (is_shared) {
         // Share pointer
-        // Note: This assumes token_embedding_table is on device and we just reuse the pointer.
-        // But device_malloc allocates new memory. 
-        // In this simple struct, we have pointers. 
-        // If we just copy the pointer: w->lm_head = w->token_embedding_table;
-        // It works for reading. But double-freeing might be an issue in free_run_state if it frees weights?
-        // Wait, weights are freed where? User code comments say "// free weights...".
-        // There is no free_weights function implemented in the snippet.
         w->lm_head = w->token_embedding_table;
         printf("Weights shared: lm_head -> token_embedding_table\n");
     } else {
@@ -304,9 +299,14 @@ void malloc_run_state(RunState* s, Config* p) {
     check_status(device_malloc((void**)&s->logits, vocab_size * sizeof(float)));
     
     // KV Cache
-    size_t cache_size = (size_t)n_layers * max_seq_len * n_kv_heads * head_dim;
-    check_status(device_malloc((void**)&s->key_cache, cache_size * sizeof(float)));
-    check_status(device_malloc((void**)&s->value_cache, cache_size * sizeof(float)));
+    if (!g_paged_mode) {
+        size_t cache_size = (size_t)n_layers * max_seq_len * n_kv_heads * head_dim;
+        check_status(device_malloc((void**)&s->key_cache, cache_size * sizeof(float)));
+        check_status(device_malloc((void**)&s->value_cache, cache_size * sizeof(float)));
+    } else {
+        s->key_cache = NULL;
+        s->value_cache = NULL;
+    }
 }
 
 void free_run_state(RunState* s) {
@@ -320,6 +320,6 @@ void free_run_state(RunState* s) {
     check_status(device_free(s->v));
     check_status(device_free(s->att));
     check_status(device_free(s->logits));
-    check_status(device_free(s->key_cache));
-    check_status(device_free(s->value_cache));
+    if (s->key_cache) check_status(device_free(s->key_cache));
+    if (s->value_cache) check_status(device_free(s->value_cache));
 }
