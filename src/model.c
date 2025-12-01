@@ -1,21 +1,74 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "structs.h"
 #include "backend.h"
 
+// FP16 to FP32 conversion
+// Reference: https://stackoverflow.com/questions/1659440/32-bit-to-16-bit-floating-point-conversion
+static inline float fp16_to_fp32(uint16_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exponent = (h & 0x7C00) >> 10;
+    uint32_t mantissa = (h & 0x03FF) << 13;
+    
+    uint32_t result;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            // Zero
+            result = sign;
+        } else {
+            // Denormalized number
+            exponent = 1;
+            while ((mantissa & 0x00800000) == 0) {
+                mantissa <<= 1;
+                exponent--;
+            }
+            mantissa &= ~0x00800000;
+            exponent = exponent + (127 - 15);
+            result = sign | (exponent << 23) | mantissa;
+        }
+    } else if (exponent == 0x1F) {
+        // Inf or NaN
+        result = sign | 0x7F800000 | mantissa;
+    } else {
+        // Normalized number
+        exponent = exponent + (127 - 15);
+        result = sign | (exponent << 23) | mantissa;
+    }
+    
+    return *(float*)&result;
+}
+
 // Helper to allocate and read a tensor from file to GPU
+// Reads FP16 from file and converts to FP32
 float* load_tensor(FILE* f, size_t size) {
-    float* host_ptr = (float*)malloc(size * sizeof(float));
-    if (!host_ptr) {
-        fprintf(stderr, "Failed to allocate host memory for tensor of size %zu\n", size);
+    // Read FP16 data
+    uint16_t* fp16_ptr = (uint16_t*)malloc(size * sizeof(uint16_t));
+    if (!fp16_ptr) {
+        fprintf(stderr, "Failed to allocate memory for FP16 tensor of size %zu\n", size);
         exit(1);
     }
-    if (fread(host_ptr, sizeof(float), size, f) != size) {
-        fprintf(stderr, "Failed to read tensor from file\n");
+    if (fread(fp16_ptr, sizeof(uint16_t), size, f) != size) {
+        fprintf(stderr, "Failed to read FP16 tensor from file (expected %zu elements)\n", size);
+        free(fp16_ptr);
         exit(1);
     }
     
+    // Convert to FP32
+    float* host_ptr = (float*)malloc(size * sizeof(float));
+    if (!host_ptr) {
+        fprintf(stderr, "Failed to allocate host memory for FP32 tensor of size %zu\n", size);
+        free(fp16_ptr);
+        exit(1);
+    }
+    
+    for (size_t i = 0; i < size; i++) {
+        host_ptr[i] = fp16_to_fp32(fp16_ptr[i]);
+    }
+    free(fp16_ptr);
+    
+    // Copy to device
     float* device_ptr;
     check_status(device_malloc((void**)&device_ptr, size * sizeof(float)));
     check_status(device_memcpy(device_ptr, host_ptr, size * sizeof(float), HOST_TO_DEVICE));

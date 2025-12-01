@@ -13,7 +13,7 @@ A minimalist, pure C implementation of LLM inference, designed to demystify mode
   - ASCII Art Visualization of internal model states.
   - Simple, readable implementations of complex kernels.
   - Direct memory management (malloc/cudaMalloc) to understand data flow.
-- **Llama-2 Compatible**: Supports loading `llama2.c` models (with conversion).
+- **HuggingFace Compatible**: Supports loading any Llama-architecture model from HuggingFace.
 
 ## Getting Started
 
@@ -25,16 +25,15 @@ A minimalist, pure C implementation of LLM inference, designed to demystify mode
 
 ### 1. Download & Prepare Model
 
-This project uses the `stories15M` model from Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) as a lightweight test case.
+This project uses HuggingFace models exported to a custom binary format (FP16).
 
 ```bash
-# 1. Download model and tokenizer
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin -O data/stories15M.bin
-curl -L https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin -o data/tokenizer.bin
+# Export a model from HuggingFace (example: TinyLlama)
+cd python_ref
+python export_binary.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --output data/model.bin
 
-# 2. Convert model format
-# (Our engine uses a slightly different binary layout for optimization)
-python3 tools/convert_llama2c.py data/stories15M.bin data/stories15M_converted.bin
+# Download tokenizer (llama2.c format)
+curl -L https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin -o ../data/tokenizer.bin
 ```
 
 ### 2. Build
@@ -55,7 +54,7 @@ Run the inference engine with the model path and the number of tokens to generat
 
 ```bash
 # Syntax: ./nano_vllm_cpu <model_path> <steps>
-./nano_vllm_cpu data/stories15M_converted.bin 50
+./nano_vllm_cpu python_ref/data/model.bin 100
 ```
 
 You will see the model generating text token-by-token, along with a visualization of the Attention mechanism!
@@ -81,8 +80,8 @@ nano-vllm/
 │   ├── cpu/            # Pure C kernels & Visualizer
 │   └── gpu/            # CUDA kernels (Attention, Layers)
 ├── include/            # Header files
-├── tools/              # Python/C utilities (conversion, verification)
-├── data/               # Model binaries
+├── python_ref/         # Python reference implementation & export tools
+├── data/               # Model binaries & tokenizer
 └── Makefile            # Build configuration
 ```
 

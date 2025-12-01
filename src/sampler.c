@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include "nano_cuda.h" // for cudaCheck if needed, but sampler is CPU logic mostly
 
 // Simple Random Number Generator (xorshift)
 // Using standard rand() for simplicity in Phase 1, but a custom one is more deterministic for testing.
