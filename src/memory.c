@@ -16,6 +16,25 @@ void init_kv_cache_manager(KVCacheManager* mgr, int block_size, int num_blocks, 
     }
     
     // Allocate Physical Memory Pool
+    /* 
+     * Visualizing KV Cache Memory Pool Structure (5D Tensor):
+     * 
+     * pool_k / pool_v
+     * ├── Layer 0
+     * │   ├── Block 0
+     * │   │   ├── Token 0
+     * │   │   │   ├── Head 0: [float, float, ... (head_dim)]
+     * │   │   │   ├── Head 1: [float, float, ... (head_dim)]
+     * │   │   │   └── ...
+     * │   │   ├── Token 1
+     * │   │   └── ... (up to block_size)
+     * │   ├── Block 1
+     * │   └── ... (up to num_blocks)
+     * ├── Layer 1
+     * └── ... (up to n_layers)
+     *
+     * Total Size = n_layers * num_blocks * block_size * n_kv_heads * head_dim
+     */
     // Size: [n_layers, num_blocks, block_size, n_kv_heads, head_dim]
     long total_elements = (long)n_layers * num_blocks * block_size * n_kv_heads * head_dim;
     mgr->pool_k = (float*)malloc(total_elements * sizeof(float));

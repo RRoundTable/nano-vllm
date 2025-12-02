@@ -58,25 +58,42 @@ void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
 // RoPE
 // ===========================================================================
 
+// Apply Rotary Positional Embedding (RoPE)
+// Formula:
+// 1. Calculate frequency (freq): theta_i = 1.0 / (theta ^ (i / head_dim))
+// 2. Calculate rotation angle (val): angle = pos * theta_i
+// 3. Apply rotation matrix:
+//    [ v_i'   ]   [ cos(angle)  -sin(angle) ] [ v_i   ]
+//    [ v_i+1' ] = [ sin(angle)   cos(angle) ] [ v_i+1 ]
+//
+//    v_i'   = v_i * cos(angle) - v_i+1 * sin(angle)
+//    v_i+1' = v_i * sin(angle) + v_i+1 * cos(angle)
 void apply_rope(float* q, float* k, int pos, float theta, int head_dim, int n_heads, int n_kv_heads) {
     for (int i = 0; i < head_dim; i+=2) {
+        // Calculate frequency and angle
+        // freq = 1 / theta^(i/d)
         float freq = 1.0f / powf(theta, i / (float)head_dim);
+        // val = pos * freq (rotation angle)
         float val = pos * freq;
         float fcr = cosf(val);
         float fci = sinf(val);
         
+        // Query 벡터에 RoPE 적용
         for (int h = 0; h < n_heads; h++) {
             float* vec = q + h * head_dim;
             float v0 = vec[i];
             float v1 = vec[i+1];
-            vec[i]   = v0 * fcr - v1 * fci;
-            vec[i+1] = v0 * fci + v1 * fcr;
+            // Apply rotation
+            vec[i]   = v0 * fcr - v1 * fci; // real part calculation
+            vec[i+1] = v0 * fci + v1 * fcr; // imaginary part calculation
         }
         
+        // Key 벡터에 RoPE 적용
         for (int h = 0; h < n_kv_heads; h++) {
             float* vec = k + h * head_dim;
             float v0 = vec[i];
             float v1 = vec[i+1];
+            // Apply rotation
             vec[i]   = v0 * fcr - v1 * fci;
             vec[i+1] = v0 * fci + v1 * fcr;
         }
@@ -87,10 +104,15 @@ void apply_rope(float* q, float* k, int pos, float theta, int head_dim, int n_he
 // Activation / Element-wise
 // ===========================================================================
 
+// Apply SwiGLU (Swish-Gated Linear Unit) activation
+// Formula: output = SiLU(gate) * up
+// where SiLU(x) = x * sigmoid(x) = x / (1 + e^-x)
 void swiglu(float* hb, float* gate, float* up, int hidden_dim) {
     for (int i = 0; i < hidden_dim; i++) {
         float g = gate[i];
-        float val = g / (1.0f + expf(-g)); // SiLU
+        // Calculate SiLU activation: val = g * sigmoid(g)
+        float val = g / (1.0f + expf(-g));
+        // Element-wise multiplication
         hb[i] = val * up[i];
     }
 }
@@ -227,7 +249,7 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
                      int layer, int pos, int max_seq_len, int n_heads, int n_kv_heads, int head_dim) {
     
     float scale = 1.0f / sqrtf(head_dim);
-    int block_size = mgr->block_size;
+    int block_size = mgr->block_size; # the number of tokens in a block
     
     #if defined(_OPENMP)
     #pragma omp parallel for
@@ -245,6 +267,11 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
             int physical_block = block_table->block_indices[logical_block];
             
             long offset = get_physical_offset(mgr, layer, physical_block, block_offset, n_kv_heads, head_dim);
+            
+            // Calculate k_head pointer address:
+            // 1. mgr->pool_k: Base address of the entire Key cache memory pool
+            // 2. offset: Distance to the specific [Layer, Physical Block, Token Offset]
+            // 3. kv_h * head_dim: Start position of the specific KV Head vector within that token
             float* k_head = mgr->pool_k + offset + kv_h * head_dim;
             
             float score = 0.0f;
