@@ -151,9 +151,20 @@ void transformer(int token, int pos, Config* p, RunState* s, Weights* w, BlockTa
     matmul(s->logits, s->x, w->lm_head, p->dim, p->vocab_size);
 }
 
+void print_usage(char *prog_name) {
+    printf("Usage: %s <model_path> [options]\n", prog_name);
+    printf("\nOptions:\n");
+    printf("  -t <temp>    Temperature (default: 1.0)\n");
+    printf("  -p <topp>    Top-p value (default: 0.9)\n");
+    printf("  -n <steps>   Number of generation steps (default: 64)\n");
+    printf("  -i <prompt>  Input prompt (default: \"Hello, my name is\")\n");
+    printf("  --paged      Enable paged attention mode\n");
+    printf("\n");
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: %s <model_path> [steps] [--paged]\n", argv[0]);
+        print_usage(argv[0]);
         return 1;
     }
     
@@ -161,37 +172,34 @@ int main(int argc, char** argv) {
     int steps = 64; // Default reduced for multi-seq demo
     float temperature = 1.0f;
     float topp = 0.9f;
-
-    // poor man's C argparse so we can override the defaults above from the command line
-    // Usage: ./run <model_path> [options]
-    // Options: -t <temp> -p <topp> -n <steps>
-    
-    // Multi-sequence Prompts
     char *user_prompt = NULL; // If user provides specific prompt
-    
+
+    // Argument parsing
     for (int i = 2; i < argc; i++) {
-        if (argv[i][0] == '-') {
-            if (argv[i][1] == 't') { 
-                if (i + 1 < argc) { temperature = atof(argv[i + 1]); i++; }
-            }
-            else if (argv[i][1] == 'p') { 
-                if (i + 1 < argc) { topp = atof(argv[i + 1]); i++; }
-            }
-            else if (argv[i][1] == 'n') { 
-                if (i + 1 < argc) { steps = atoi(argv[i + 1]); i++; }
-            }
-            else if (argv[i][1] == 'i') { 
-                if (i + 1 < argc) { user_prompt = argv[i + 1]; i++; }
-            }
-            else if (strcmp(argv[i], "--paged") == 0) {
-                g_visualize_paged = 1;
-                g_paged_mode = 1;
-            }
-        } else {
+        if (strcmp(argv[i], "-t") == 0) {
+            if (i + 1 < argc) { temperature = atof(argv[++i]); }
+        }
+        else if (strcmp(argv[i], "-p") == 0) {
+            if (i + 1 < argc) { topp = atof(argv[++i]); }
+        }
+        else if (strcmp(argv[i], "-n") == 0) {
+            if (i + 1 < argc) { steps = atoi(argv[++i]); }
+        }
+        else if (strcmp(argv[i], "-i") == 0) {
+            if (i + 1 < argc) { user_prompt = argv[++i]; }
+        }
+        else if (strcmp(argv[i], "--paged") == 0) {
+            g_visualize_paged = 1;
+            g_paged_mode = 1;
+        }
+        else if (i == 2 && isdigit(argv[i][0])) {
             // Compatibility with old positional arg [steps]
-             if (i == 2 && isdigit(argv[i][0])) {
-                steps = atoi(argv[i]);
-            }
+            steps = atoi(argv[i]);
+        }
+        else {
+            printf("Unknown argument: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
         }
     }
     
