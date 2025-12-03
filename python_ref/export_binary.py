@@ -163,24 +163,52 @@ def export_llama_binary(model_name: str, output_path: str, export_tokenizer_flag
         print("\nWriting token embedding...")
         write_tensor(model.model.embed_tokens.weight, "token_embedding_table")
         
-        # Write layer weights
+        # Write weights grouped by parameter type (to match src/model.c loading order)
+        
+        # 1. rms_att_weight
+        print("\nWriting rms_att_weight...")
         for i in range(n_layers):
-            print(f"\nWriting layer {i}...")
-            layer = model.model.layers[i]
-            
-            # Attention
-            write_tensor(layer.input_layernorm.weight, f"layer{i}.rms_att_weight")
-            write_tensor(layer.self_attn.q_proj.weight.t(), f"layer{i}.wq")  # Transpose for row-major
-            write_tensor(layer.self_attn.k_proj.weight.t(), f"layer{i}.wk")
-            write_tensor(layer.self_attn.v_proj.weight.t(), f"layer{i}.wv")
-            write_tensor(layer.self_attn.o_proj.weight.t(), f"layer{i}.wo")
-            
-            # FFN
-            # Write order: gate, down, up (matches llama2.c)
-            write_tensor(layer.post_attention_layernorm.weight, f"layer{i}.rms_ffn_weight")
-            write_tensor(layer.mlp.gate_proj.weight.t(), f"layer{i}.w_gate")
-            write_tensor(layer.mlp.down_proj.weight.t(), f"layer{i}.w_down")
-            write_tensor(layer.mlp.up_proj.weight.t(), f"layer{i}.w_up")
+            write_tensor(model.model.layers[i].input_layernorm.weight, f"layer{i}.rms_att_weight")
+
+        # 2. wq
+        print("\nWriting wq...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].self_attn.q_proj.weight.t(), f"layer{i}.wq")
+
+        # 3. wk
+        print("\nWriting wk...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].self_attn.k_proj.weight.t(), f"layer{i}.wk")
+
+        # 4. wv
+        print("\nWriting wv...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].self_attn.v_proj.weight.t(), f"layer{i}.wv")
+
+        # 5. wo
+        print("\nWriting wo...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].self_attn.o_proj.weight.t(), f"layer{i}.wo")
+
+        # 6. rms_ffn_weight
+        print("\nWriting rms_ffn_weight...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].post_attention_layernorm.weight, f"layer{i}.rms_ffn_weight")
+
+        # 7. w_gate
+        print("\nWriting w_gate...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].mlp.gate_proj.weight.t(), f"layer{i}.w_gate")
+
+        # 8. w_down
+        print("\nWriting w_down...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].mlp.down_proj.weight.t(), f"layer{i}.w_down")
+
+        # 9. w_up
+        print("\nWriting w_up...")
+        for i in range(n_layers):
+            write_tensor(model.model.layers[i].mlp.up_proj.weight.t(), f"layer{i}.w_up")
         
         # Final norm
         print("\nWriting final norm...")
