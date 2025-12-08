@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "structs.h"
 #include "ops.h"
+#include "backend.h"
 
 // Initialize the KV Cache Manager
 void init_kv_cache_manager(KVCacheManager* mgr, int block_size, int num_blocks, int n_layers, int n_kv_heads, int head_dim) {
@@ -9,13 +10,13 @@ void init_kv_cache_manager(KVCacheManager* mgr, int block_size, int num_blocks, 
     mgr->num_blocks = num_blocks;
     mgr->free_blocks_count = num_blocks;
     
-    // Allocate free block stack
+    // Allocate free block stack (Host Memory)
     mgr->free_block_indices = (int*)malloc(num_blocks * sizeof(int));
     for (int i = 0; i < num_blocks; i++) {
         mgr->free_block_indices[i] = num_blocks - 1 - i; // Reverse order (stack)
     }
     
-    // Allocate Physical Memory Pool
+    // Allocate Physical Memory Pool (Device Memory)
     /* 
      * Visualizing KV Cache Memory Pool Structure (5D Tensor):
      * 
@@ -37,20 +38,16 @@ void init_kv_cache_manager(KVCacheManager* mgr, int block_size, int num_blocks, 
      */
     // Size: [n_layers, num_blocks, block_size, n_kv_heads, head_dim]
     long total_elements = (long)n_layers * num_blocks * block_size * n_kv_heads * head_dim;
-    mgr->pool_k = (float*)malloc(total_elements * sizeof(float));
-    mgr->pool_v = (float*)malloc(total_elements * sizeof(float));
     
-    if (!mgr->pool_k || !mgr->pool_v) {
-        fprintf(stderr, "Failed to allocate KV Cache Pool!\n");
-        exit(1);
-    }
+    check_status(device_malloc((void**)&mgr->pool_k, total_elements * sizeof(float)));
+    check_status(device_malloc((void**)&mgr->pool_v, total_elements * sizeof(float)));
 }
 
 // Free the manager resources
 void free_kv_cache_manager(KVCacheManager* mgr) {
     if (mgr->free_block_indices) free(mgr->free_block_indices);
-    if (mgr->pool_k) free(mgr->pool_k);
-    if (mgr->pool_v) free(mgr->pool_v);
+    if (mgr->pool_k) check_status(device_free(mgr->pool_k));
+    if (mgr->pool_v) check_status(device_free(mgr->pool_v));
 }
 
 // Allocate a new block

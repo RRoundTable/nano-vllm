@@ -61,19 +61,24 @@ extern "C" void matmul(float* out, float* in, float* weight, int in_dim, int out
     // A is weight. x is input.
     // Since weight is stored as [in_dim, out_dim] (row-major), 
     // BLAS sees it as [out_dim, in_dim] (col-major).
-    // So A is (out x in). x is (in x 1).
-    // Result is (out x 1).
+    
+    // So weight is actually M = W^T (where W is the logical [out, in] matrix).
+    // M has dimensions [in_dim, out_dim] in BLAS column-major view.
+    // We want y = W * x = M^T * x.
     
     float alpha = 1.0f;
     float beta = 0.0f;
     
-    // cublasSgemv(handle, op, m, n, alpha, A, lda, x, incx, beta, y, incy)
-    // op=N, m=out_dim, n=in_dim.
-    // lda = leading dimension of A = out_dim.
+    // cublasSgemv(handle, trans, m, n, alpha, A, lda, x, incx, beta, y, incy)
+    // We compute: y = A^T * x
+    // where A is [in_dim, out_dim].
+    // m = rows of A = in_dim
+    // n = cols of A = out_dim
+    // lda = rows of A = in_dim
     
-    cublasStatus_t status = cublasSgemv(cublas_handle, CUBLAS_OP_N, 
-                                        out_dim, in_dim, 
-                                        &alpha, weight, out_dim, 
+    cublasStatus_t status = cublasSgemv(cublas_handle, CUBLAS_OP_T, 
+                                        in_dim, out_dim, 
+                                        &alpha, weight, in_dim, 
                                         in, 1, 
                                         &beta, out, 1);
                                         

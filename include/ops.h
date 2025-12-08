@@ -3,6 +3,10 @@
 
 #include "structs.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Global init/free for libraries (like cuBLAS)
 void init_ops();
 void free_ops();
@@ -44,5 +48,9 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
 void visualize_attention(float* att, int n_heads, int pos, int max_seq_len);
 // mode: 0 = Linear (Naive), 1 = Paged (Block-based)
 void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr, int max_seq_len, int mode);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

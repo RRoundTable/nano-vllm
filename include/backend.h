@@ -10,7 +10,7 @@
 // Maps device_X functions to either CUDA or Standard C
 // ==========================================
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(NANO_CUDA)
     // --------------------------------------
     // GPU Backend (CUDA)
     // --------------------------------------

@@ -88,6 +88,7 @@ typedef struct {
     int current_token;// Last generated token
     int* prompt_tokens;
     int num_prompt_tokens;
+    int* output_history; // Store full token history
     RunState* state;  // Dedicated activation memory for this seq
     BlockTable table; // Dedicated block table for this seq
 } Sequence;

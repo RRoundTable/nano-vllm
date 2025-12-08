@@ -39,7 +39,9 @@ static inline float fp16_to_fp32(uint16_t h) {
         result = sign | (exponent << 23) | mantissa;
     }
     
-    return *(float*)&result;
+    float f_result;
+    memcpy(&f_result, &result, sizeof(float));
+    return f_result;
 }
 
 // Helper to allocate and read a tensor from file to GPU

@@ -249,7 +249,7 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
                      int layer, int pos, int max_seq_len, int n_heads, int n_kv_heads, int head_dim) {
     
     float scale = 1.0f / sqrtf(head_dim);
-    int block_size = mgr->block_size; # the number of tokens in a block
+    int block_size = mgr->block_size; // the number of tokens in a block
     
     #if defined(_OPENMP)
     #pragma omp parallel for

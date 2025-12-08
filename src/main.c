@@ -248,6 +248,9 @@ int main(int argc, char** argv) {
         seqs[i].state = (RunState*)malloc(sizeof(RunState));
         malloc_run_state(seqs[i].state, &config);
         
+        // Alloc History
+        seqs[i].output_history = (int*)malloc(seqs[i].seq_len * sizeof(int));
+
         // BlockTable Init (Wait until paged manager init)
     }
     
@@ -296,6 +299,13 @@ int main(int argc, char** argv) {
         seqs[i].prompt_tokens = (int*)malloc((strlen(prompts[i]) + 3) * sizeof(int)); 
         encode(&tokenizer, prompts[i], 1, 0, seqs[i].prompt_tokens, &seqs[i].num_prompt_tokens);
         seqs[i].current_token = seqs[i].prompt_tokens[0]; // Start token
+        
+        // Init history with prompt
+        // Note: seq_len might be smaller than prompt if user sets very small steps, handle that?
+        // Assuming seq_len >= num_prompt_tokens for now or just filling what fits.
+        for(int j=0; j<seqs[i].num_prompt_tokens && j < seqs[i].seq_len; j++) {
+            seqs[i].output_history[j] = seqs[i].prompt_tokens[j];
+        }
     }
 
     log_printf("Starting Multi-Sequence Inference (%d sequences)...\n", BATCH_SIZE);
@@ -332,7 +342,7 @@ int main(int argc, char** argv) {
             } else {
                 // Sample
                 float* host_logits;
-                #ifdef __CUDACC__
+                #if defined(__CUDACC__) || defined(NANO_CUDA)
                     host_logits = (float*)malloc(config.vocab_size * sizeof(float));
                     check_status(device_memcpy(host_logits, seqs[i].state->logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
                 #else
@@ -341,7 +351,7 @@ int main(int argc, char** argv) {
                 
                 next_token = sample(&sampler, host_logits);
                 
-                #ifdef __CUDACC__
+                #if defined(__CUDACC__) || defined(NANO_CUDA)
                     free(host_logits);
                 #endif
             }
@@ -349,6 +359,11 @@ int main(int argc, char** argv) {
             // Print
             const char* text = decode_token(&tokenizer, next_token);
             log_printf("[Seq %d]: %s\n", i, text);
+            
+            // Update History
+            if (seqs[i].pos + 1 < seqs[i].seq_len) {
+                seqs[i].output_history[seqs[i].pos + 1] = next_token;
+            }
             
             // Update State
             seqs[i].current_token = next_token;
@@ -364,14 +379,29 @@ int main(int argc, char** argv) {
         
         // Visualize Memory State (Once per step, after all seqs updated)
         if (any_active && global_step % 1 == 0) { // Visualize every step
-             #ifndef __CUDACC__
              visualize_kv_cache_usage(seqs, BATCH_SIZE, &g_kv_manager, config.max_seq_len, g_visualize_paged);
-             #endif
         }
         global_step++;
     }
     
     log_printf("\nAll sequences finished.\n");
+    
+    // Print Final Summaries
+    log_printf("\n=== Final Generated Sequences ===\n");
+    for(int i=0; i<BATCH_SIZE; i++) {
+        log_printf("[Seq %d]: ", i);
+        for(int j=0; j<seqs[i].seq_len; j++) {
+            // Note: decode_token returns a static buffer, so we must print immediately or copy
+            // Also, some tokens might be partial or special, but decode_token handles basic piece lookup
+            // If pos < seq_len (finished early?), we should use seqs[i].pos
+            if (j > seqs[i].pos) break;
+            
+            const char* text = decode_token(&tokenizer, seqs[i].output_history[j]);
+            log_printf("%s", text);
+        }
+        log_printf("\n");
+    }
+    log_printf("=================================\n\n");
     
     clock_t end = clock();
     double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
@@ -383,6 +413,7 @@ int main(int argc, char** argv) {
         free_run_state(seqs[i].state);
         free(seqs[i].state);
         free(seqs[i].prompt_tokens);
+        free(seqs[i].output_history);
         if (g_paged_mode) {
             free(seqs[i].table.block_indices);
         }
