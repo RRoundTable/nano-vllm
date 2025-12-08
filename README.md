@@ -8,7 +8,7 @@ A minimalist, pure C implementation of LLM inference, designed to demystify mode
 
 - **Dual Backend Architecture**:
   - **CPU Backend**: Pure C implementation compatible with any system (Mac/Linux). Includes a terminal-based visualizer for Attention scores and KV Cache memory usage.
-  - **GPU Backend**: CUDA implementation for NVIDIA GPUs (Planned/Partial).
+  - **GPU Backend**: CUDA implementation for NVIDIA GPUs with Paged Attention support.
 - **Educational Focus**:
   - ASCII Art Visualization of internal model states.
   - Simple, readable implementations of complex kernels.
@@ -28,6 +28,10 @@ A minimalist, pure C implementation of LLM inference, designed to demystify mode
 This project uses HuggingFace models exported to a custom binary format (FP16).
 
 ```bash
+# Easy setup script to download TinyStories (15M or 42M)
+./setup_models.sh
+
+# Or manually:
 # Export a model from HuggingFace (example: TinyLlama)
 cd python_ref
 python export_binary.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --output data/model.bin
@@ -50,11 +54,18 @@ make gpu
 
 ### 3. Run Inference
 
-Run the inference engine with the model path and the number of tokens to generate.
+Run the inference engine with the model path. You can enable Paged Attention mode with `--paged`.
 
+**CPU Inference:**
 ```bash
-# Syntax: ./nano_vllm_cpu <model_path> <steps>
-./nano_vllm_cpu python_ref/data/model.bin 100
+# Syntax: ./nano_vllm_cpu <model_path> [options]
+./nano_vllm_cpu python_ref/data/model.bin -n 100 -i "Once upon a time" --paged
+```
+
+**GPU Inference:**
+```bash
+# Syntax: ./nano_vllm_gpu <model_path> [options]
+./nano_vllm_gpu python_ref/data/model.bin -n 100 -i "Once upon a time" --paged
 ```
 
 You will see the model generating text token-by-token, along with a visualization of the Attention mechanism!
@@ -66,9 +77,14 @@ Head:   H00     H01     H02     H03
 t048: [..-] [.....] [.....] [.....] 
 t049: [--*] [.....] [.....] [..-] 
 
-[Visualizer] KV Cache Usage: 50/256 tokens (19.5%)
-Mem: [#####.............................................]
-Once upon a time...
+[Visualizer] Memory Breakdown (Mode: Paged)
+Reqs: [Req0:4 Blks] [Req1:5 Blks] ...
+
+Memory Map (Total Pool: 64 blocks = 1024 slots):
+[#####################........................._______]
+1. Used (Actual Data)        : 450 (43.9%)
+2. Internal Frag (Last Page) : 58 (5.7%)
+3. Free (Available Blocks)   : 516 (50.4%)
 ```
 
 ## Project Structure
@@ -88,9 +104,9 @@ nano-vllm/
 ## Roadmap
 
 - [x] **Phase 1**: Naive CPU Inference & Visualization
-- [ ] **Phase 2**: CUDA Kernels (Naive)
+- [x] **Phase 2**: CUDA Kernels (Naive)
 - [ ] **Phase 3**: Tiled Attention Optimization
-- [ ] **Phase 4**: PagedAttention (KV Cache Paging)
+- [x] **Phase 4**: PagedAttention (KV Cache Paging) - *Implemented for CPU & GPU*
 - [ ] **Phase 5**: Continuous Batching
 
 ## License

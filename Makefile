@@ -17,7 +17,7 @@ else
 endif
 
 # Flags for CUDA
-NVCC_FLAGS = -O3 -arch=sm_70 -Iinclude
+NVCC_FLAGS = -O3 -arch=sm_80 -Iinclude -DNANO_CUDA
 
 # Sources
 SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c
@@ -27,6 +27,7 @@ SRCS_CPU_KERNELS = kernels/cpu/kernels.c kernels/cpu/visualizer.c
 # Objects
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_CPU_KERNELS = $(SRCS_CPU_KERNELS:.c=.o)
+OBJS_VISUALIZER = kernels/cpu/visualizer.o
 
 all: $(TARGET_CPU)
 
@@ -45,7 +46,7 @@ $(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS)
 # GPU Build (requires nvcc)
 gpu: $(TARGET_GPU)
 
-$(TARGET_GPU): $(SRCS_C) $(SRCS_CU)
+$(TARGET_GPU): $(SRCS_C) $(SRCS_CU) $(OBJS_VISUALIZER)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $^ -lcublas
 
 setup:
