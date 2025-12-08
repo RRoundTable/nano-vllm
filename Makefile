@@ -22,12 +22,13 @@ NVCC_FLAGS = -O3 -arch=sm_80 -Iinclude -DNANO_CUDA
 # Sources
 SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c
 SRCS_CU = kernels/gpu/layers.cu kernels/gpu/attention.cu
-SRCS_CPU_KERNELS = kernels/cpu/kernels.c kernels/cpu/visualizer.c
+SRCS_CPU_KERNELS = kernels/cpu/layers.c kernels/cpu/attention.c
+SRCS_VISUALIZER = src/visualizer.c
 
 # Objects
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_CPU_KERNELS = $(SRCS_CPU_KERNELS:.c=.o)
-OBJS_VISUALIZER = kernels/cpu/visualizer.o
+OBJS_VISUALIZER = $(SRCS_VISUALIZER:.c=.o)
 
 all: $(TARGET_CPU)
 
@@ -37,7 +38,7 @@ cpu:
 	$(MAKE) clean
 	$(MAKE) $(TARGET_CPU)
 
-$(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS)
+$(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS) $(OBJS_VISUALIZER)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS_CPU)
 
 %.o: %.c
