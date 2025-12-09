@@ -48,7 +48,7 @@ $(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS) $(OBJS_VISUALIZER)
 gpu: $(TARGET_GPU)
 
 $(TARGET_GPU): $(SRCS_C) $(SRCS_CU) $(OBJS_VISUALIZER)
-	$(NVCC) $(NVCC_FLAGS) -o $@ $^ -lcublas
+	$(NVCC) $(NVCC_FLAGS) -o $@ $^
 
 setup:
 	./setup_models.sh
