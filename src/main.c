@@ -8,6 +8,7 @@
 #include "ops.h"
 #include "backend.h"
 #include "log.h"
+#include <limits.h>
 
 // Forward declarations
 void load_model(Weights* w, Config* p, const char* checkpoint_path);
@@ -54,101 +55,109 @@ int g_paged_mode = 0; // Actual Logic Mode
 // PagedAttention Globals
 KVCacheManager g_kv_manager;
 
-void transformer(int token, int pos, Config* p, RunState* s, Weights* w, BlockTable* bt) {
+// Refactored Transformer to support Batched Processing
+void transformer(int* tokens, int num_tokens, int pos, Config* p, RunState* s, Weights* w, BlockTable* bt) {
     
     // Scheduler Logic: Allocate new block if needed (Only in Paged Mode)
+    // NOTE: For batched processing, we might need multiple blocks.
+    // For now, let's assume one block allocation per call or enough capacity.
+    // In strict PagedAttention, we check block boundaries for EACH token.
     if (g_paged_mode) {
         int block_size = g_kv_manager.block_size;
-        if (pos % block_size == 0) {
-            // Need a new block for this position
-            int new_block = alloc_block(&g_kv_manager);
-            if (new_block == -1) {
-                printf("Error: Out of KV Cache blocks!\n");
-                exit(1);
+        for (int t = 0; t < num_tokens; t++) {
+            int current_pos = pos + t;
+            if (current_pos % block_size == 0) {
+                // Need a new block for this position
+                int new_block = alloc_block(&g_kv_manager);
+                if (new_block == -1) {
+                    printf("Error: Out of KV Cache blocks!\n");
+                    exit(1);
+                }
+                int logical_idx = current_pos / block_size;
+                bt->block_indices[logical_idx] = new_block;
+                bt->num_blocks++;
             }
-            int logical_idx = pos / block_size;
-            // Resize block_indices if needed? (In this simple C code, we assume fixed max size or pre-allocated enough)
-            // For this demo, we pre-allocated enough in main.
-            bt->block_indices[logical_idx] = new_block;
-            bt->num_blocks++;
-            // log_printf("Allocated Block %d for Logical %d\n", new_block, logical_idx);
         }
     }
 
-    // 1. Embedding
-    float* content_row = w->token_embedding_table + token * p->dim;
-    check_status(device_memcpy(s->x, content_row, p->dim * sizeof(float), DEVICE_TO_DEVICE));
+    // 1. Embedding (Batched)
+    for (int t = 0; t < num_tokens; t++) {
+        float* content_row = w->token_embedding_table + tokens[t] * p->dim;
+        // Copy to s->x + t * dim
+        check_status(device_memcpy(s->x + t * p->dim, content_row, p->dim * sizeof(float), DEVICE_TO_DEVICE));
+    }
     
     // 2. Forward layers
     for(int i = 0; i < p->n_layers; i++) {
         LayerWeights* l = &w->layers[i];
         
         // Attention Block
-        // a. RMSNorm
-        rms_norm(s->xb, s->x, l->rms_att_weight, p->dim, 1e-5f);
+        // a. RMSNorm (Batched)
+        rms_norm(s->xb, s->x, l->rms_att_weight, p->dim, num_tokens, 1e-5f);
         
-        // b. QKV Matmuls
-        // xb [dim] @ wq [dim, n_heads * head_dim] -> q [n_heads * head_dim]
-        matmul(s->q, s->xb, l->wq, p->dim, p->n_heads * p->head_dim);
-        matmul(s->k, s->xb, l->wk, p->dim, p->n_kv_heads * p->head_dim);
-        matmul(s->v, s->xb, l->wv, p->dim, p->n_kv_heads * p->head_dim);
+        // b. QKV Matmuls (Batched: [num_tokens, dim] @ [dim, head_dim...])
+        matmul(s->q, s->xb, l->wq, num_tokens, p->dim, p->n_heads * p->head_dim);
+        matmul(s->k, s->xb, l->wk, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
+        matmul(s->v, s->xb, l->wv, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
         
-        // c. RoPE
-        apply_rope(s->q, s->k, pos, p->rope_theta, p->head_dim, p->n_heads, p->n_kv_heads);
+        // c. RoPE (Batched)
+        apply_rope(s->q, s->k, pos, p->rope_theta, p->head_dim, num_tokens, p->n_heads, p->n_kv_heads);
         
-        // d. KV Cache Update
+        // d. KV Cache Update (Batched)
         if (g_paged_mode) {
-            // Paged Update (Writes to non-contiguous memory)
             update_kv_cache_paged(&g_kv_manager, bt, s->k, s->v, 
-                                  i, pos, p->n_kv_heads, p->head_dim);
+                                  i, pos, p->n_kv_heads, p->head_dim, num_tokens);
         } else {
-            // Naive Update (Writes to contiguous memory)
             update_kv_cache(s->key_cache, s->value_cache, s->k, s->v, 
-                            i, pos, p->max_seq_len, p->n_kv_heads, p->head_dim);
+                            i, pos, p->max_seq_len, p->n_kv_heads, p->head_dim, num_tokens);
         }
         
-        // e. Multi-Head Attention
+        // e. Multi-Head Attention (Batched)
         // out = xb2 (reusing buffer)
         if (g_paged_mode) {
-            // Paged Attention (Reads from non-contiguous memory)
             paged_attention(s->xb2, s->q, &g_kv_manager, bt, s->att,
-                            i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+                            i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
         } else {
-            // Naive Attention
             multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
-                                 i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim);
+                                 i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
         }
         
-        // f. Output Projection
-        // xb2 [n_heads * head_dim] @ wo [n_heads * head_dim, dim] -> xb [dim] (reuse xb)
-        matmul(s->xb, s->xb2, l->wo, p->n_heads * p->head_dim, p->dim);
+        // f. Output Projection (Batched)
+        matmul(s->xb, s->xb2, l->wo, num_tokens, p->n_heads * p->head_dim, p->dim);
         
-        // g. Residual Connection
-        accum(s->x, s->xb, p->dim);
+        // g. Residual Connection (Batched)
+        accum(s->x, s->xb, num_tokens * p->dim);
         
         // FFN Block
         // a. RMSNorm
-        rms_norm(s->xb, s->x, l->rms_ffn_weight, p->dim, 1e-5f);
+        rms_norm(s->xb, s->x, l->rms_ffn_weight, p->dim, num_tokens, 1e-5f);
         
         // b. Gate & Up
-        matmul(s->hb, s->xb, l->w_gate, p->dim, p->hidden_dim);
-        matmul(s->hb2, s->xb, l->w_up, p->dim, p->hidden_dim);
+        matmul(s->hb, s->xb, l->w_gate, num_tokens, p->dim, p->hidden_dim);
+        matmul(s->hb2, s->xb, l->w_up, num_tokens, p->dim, p->hidden_dim);
         
         // c. SwiGLU
-        swiglu(s->hb, s->hb, s->hb2, p->hidden_dim); // Result in hb
+        swiglu(s->hb, s->hb, s->hb2, p->hidden_dim, num_tokens); // Result in hb
         
         // d. Down Projection
-        matmul(s->xb, s->hb, l->w_down, p->hidden_dim, p->dim);
+        matmul(s->xb, s->hb, l->w_down, num_tokens, p->hidden_dim, p->dim);
         
         // e. Residual Connection
-        accum(s->x, s->xb, p->dim);
+        accum(s->x, s->xb, num_tokens * p->dim);
     }
     
-    // 3. Final RMSNorm
-    rms_norm(s->x, s->x, w->rms_final_weight, p->dim, 1e-5f);
+    // 3. Final RMSNorm (Batched)
+    rms_norm(s->x, s->x, w->rms_final_weight, p->dim, num_tokens, 1e-5f);
     
     // 4. Classifier (LM Head)
-    matmul(s->logits, s->x, w->lm_head, p->dim, p->vocab_size);
+    // Optimization: We only need the logits for the LAST token in the batch to predict the next token.
+    // However, if we wanted to support "prefill" phase output for all tokens, we would compute all.
+    // Let's compute ONLY for the last token to save time, as we only sample from the last one.
+    // The last token is at index (num_tokens - 1).
+    float* last_token_embedding = s->x + (num_tokens - 1) * p->dim;
+    
+    // We treat this as a batch of size 1 for the classifier
+    matmul(s->logits, last_token_embedding, w->lm_head, 1, p->dim, p->vocab_size);
 }
 
 void print_usage(char *prog_name) {
@@ -159,6 +168,7 @@ void print_usage(char *prog_name) {
     printf("  -n <steps>   Number of generation steps (default: 64)\n");
     printf("  -i <prompt>  Input prompt (default: \"Hello, my name is\")\n");
     printf("  --paged      Enable paged attention mode\n");
+    printf("  --chunk-size <N>  Chunk size for prefill (default: Max)\n");
     printf("\n");
 }
 
@@ -173,6 +183,7 @@ int main(int argc, char** argv) {
     float temperature = 1.0f;
     float topp = 0.9f;
     char *user_prompt = NULL; // If user provides specific prompt
+    int chunk_size = INT_MAX; // Default: Full Sequence Prefill
 
     // Argument parsing
     for (int i = 2; i < argc; i++) {
@@ -192,6 +203,9 @@ int main(int argc, char** argv) {
             g_visualize_paged = 1;
             g_paged_mode = 1;
         }
+        else if (strcmp(argv[i], "--chunk-size") == 0) {
+            if (i + 1 < argc) { chunk_size = atoi(argv[++i]); }
+        }
         else if (i == 2 && isdigit(argv[i][0])) {
             // Compatibility with old positional arg [steps]
             steps = atoi(argv[i]);
@@ -207,6 +221,7 @@ int main(int argc, char** argv) {
     if (temperature < 0.0) temperature = 0.0;
     if (topp < 0.0 || 1.0 < topp) topp = 0.9;
     if (steps < 0) steps = 0;
+    if (chunk_size <= 0) chunk_size = 1;
 
 
     // Initialize libraries
@@ -309,6 +324,12 @@ int main(int argc, char** argv) {
     }
 
     log_printf("Starting Multi-Sequence Inference (%d sequences)...\n", BATCH_SIZE);
+    if (chunk_size < INT_MAX) {
+        log_printf("Mode: Chunked Prefill (Size: %d)\n", chunk_size);
+    } else {
+        log_printf("Mode: Full Sequence Prefill\n");
+    }
+    
     if (g_visualize_paged) {
         log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
     } else {
@@ -329,17 +350,80 @@ int main(int argc, char** argv) {
             if (!seqs[i].active) continue;
             any_active = 1;
             
-            // Run Transformer
-            // Note: For naive mode, update_kv_cache uses 's->key_cache' inside RunState, so no extra block table needed.
-            // But for Paged, we pass seqs[i].table.
-            BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
-            transformer(seqs[i].current_token, seqs[i].pos, &config, seqs[i].state, &weights, bt_ptr);
+            // Check if we are in Prefill Phase or Decode Phase
+            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1); // If pos is before last prompt token
             
-            // Next Token Logic
-            int next_token;
-            if (seqs[i].pos < seqs[i].num_prompt_tokens - 1) {
-                next_token = seqs[i].prompt_tokens[seqs[i].pos + 1];
+            if (is_prefill) {
+                // --- CHUNKED PREFILL ---
+                int start_pos = seqs[i].pos;
+                int end_pos = seqs[i].num_prompt_tokens; // Exclusive
+                int remaining = end_pos - start_pos;
+                int n_tokens = (remaining > chunk_size) ? chunk_size : remaining;
+                
+                // Point to the chunk of tokens
+                int* chunk_ptr = seqs[i].prompt_tokens + start_pos;
+                
+                BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
+                transformer(chunk_ptr, n_tokens, start_pos, &config, seqs[i].state, &weights, bt_ptr);
+                
+                // Update position
+                seqs[i].pos += n_tokens; 
+                
+                // Update current_token to the last processed one
+                seqs[i].current_token = chunk_ptr[n_tokens - 1];
+                
+                // Check if we finished the prompt
+                // We finished if pos reached (num_prompt_tokens)
+                // Wait, logic:
+                // If we processed up to num_prompt_tokens, we are done with prefill.
+                // But `is_prefill` condition was `pos < num_prompt - 1`.
+                // If we processed everything, `pos` will be `num_prompt`.
+                
+                // However, we want to Sample ONLY if we processed the LAST token of the prompt.
+                // The last token of the prompt is at index `num_prompt_tokens - 1`.
+                // If our chunk INCLUDED this last token, then we can sample.
+                
+                int finished_prompt = (seqs[i].pos >= seqs[i].num_prompt_tokens);
+                
+                if (finished_prompt) {
+                    // Sample next token
+                    float* host_logits;
+                    #if defined(__CUDACC__) || defined(NANO_CUDA)
+                        host_logits = (float*)malloc(config.vocab_size * sizeof(float));
+                        check_status(device_memcpy(host_logits, seqs[i].state->logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
+                    #else
+                        host_logits = seqs[i].state->logits;
+                    #endif
+                    
+                    int next_token = sample(&sampler, host_logits);
+                    
+                    #if defined(__CUDACC__) || defined(NANO_CUDA)
+                        free(host_logits);
+                    #endif
+                    
+                    // Log and Store
+                    const char* text = decode_token(&tokenizer, next_token);
+                    log_printf("[Seq %d] PREFILL COMPLETE (%d tokens). First Gen: %s\n", i, n_tokens, text);
+                    
+                    if (seqs[i].pos < seqs[i].seq_len) {
+                        seqs[i].output_history[seqs[i].pos] = next_token;
+                    }
+                    
+                    seqs[i].current_token = next_token;
+                    // pos is already at the new slot
+                } else {
+                    // Not finished yet, just log
+                    log_printf("[Seq %d] Processed Chunk (%d tokens). Pos: %d/%d\n", i, n_tokens, seqs[i].pos, seqs[i].num_prompt_tokens);
+                }
+                
             } else {
+                // --- DECODE PHASE (Single Token) ---
+                BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
+                
+                // Pass single token as pointer
+                int token_arr[1] = { seqs[i].current_token };
+                transformer(token_arr, 1, seqs[i].pos, &config, seqs[i].state, &weights, bt_ptr);
+                
                 // Sample
                 float* host_logits;
                 #if defined(__CUDACC__) || defined(NANO_CUDA)
@@ -349,28 +433,27 @@ int main(int argc, char** argv) {
                     host_logits = seqs[i].state->logits;
                 #endif
                 
-                next_token = sample(&sampler, host_logits);
+                int next_token = sample(&sampler, host_logits);
                 
                 #if defined(__CUDACC__) || defined(NANO_CUDA)
                     free(host_logits);
                 #endif
+                
+                // Print
+                const char* text = decode_token(&tokenizer, next_token);
+                log_printf("[Seq %d]: %s\n", i, text);
+                
+                // Update History
+                if (seqs[i].pos + 1 < seqs[i].seq_len) {
+                    seqs[i].output_history[seqs[i].pos + 1] = next_token;
+                }
+                
+                // Update State
+                seqs[i].current_token = next_token;
+                seqs[i].pos++;
             }
-            
-            // Print
-            const char* text = decode_token(&tokenizer, next_token);
-            log_printf("[Seq %d]: %s\n", i, text);
-            
-            // Update History
-            if (seqs[i].pos + 1 < seqs[i].seq_len) {
-                seqs[i].output_history[seqs[i].pos + 1] = next_token;
-            }
-            
-            // Update State
-            seqs[i].current_token = next_token;
-            seqs[i].pos++;
             
             // Check Finish
-            // Use seq_len as generation limit (simple)
             if (seqs[i].pos >= seqs[i].seq_len) {
                 seqs[i].active = 0;
                 log_printf("[Seq %d] FINISHED.\n", i);

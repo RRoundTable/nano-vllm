@@ -289,16 +289,20 @@ void malloc_run_state(RunState* s, Config* p) {
     int head_dim = p->head_dim;
     int n_heads = p->n_heads;
 
-    check_status(device_malloc((void**)&s->x, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->xb, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->xb2, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->hb, hidden_dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->hb2, hidden_dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->q, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->k, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->v, dim * sizeof(float)));
-    check_status(device_malloc((void**)&s->att, n_heads * max_seq_len * sizeof(float))); // Should be enough for one step
-    check_status(device_malloc((void**)&s->logits, vocab_size * sizeof(float)));
+    // Allocate buffers for Batch Processing (up to max_seq_len tokens)
+    // For Chunked Prefill, this could be optimized to MAX_CHUNK_SIZE
+    int max_batch_size = max_seq_len;
+
+    check_status(device_malloc((void**)&s->x, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->xb, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->xb2, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->hb, max_batch_size * hidden_dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->hb2, max_batch_size * hidden_dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->q, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->k, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->v, max_batch_size * dim * sizeof(float)));
+    check_status(device_malloc((void**)&s->att, n_heads * max_seq_len * sizeof(float))); // Reused per token
+    check_status(device_malloc((void**)&s->logits, vocab_size * sizeof(float))); // Only need logits for the last token
     
     // KV Cache
     if (!g_paged_mode) {
