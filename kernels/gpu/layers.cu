@@ -1,19 +1,11 @@
 #include "nano_cuda.h"
 #include "ops.h"
 #include <math.h>
-#include <cublas_v2.h>
-
-static cublasHandle_t cublas_handle;
 
 extern "C" void init_ops() {
-    if (cublasCreate(&cublas_handle) != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "Failed to create cuBLAS handle\n");
-        exit(1);
-    }
 }
 
 extern "C" void free_ops() {
-    cublasDestroy(cublas_handle);
 }
 
 // ===========================================================================
@@ -53,39 +45,25 @@ extern "C" void rms_norm(float* out, float* in, float* weight, int size, float e
 }
 
 // ===========================================================================
-// MatMul (cuBLAS)
+// MatMul (Pure CUDA)
 // ===========================================================================
 
-extern "C" void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
-    // We perform y = alpha * A * x + beta * y
-    // A is weight. x is input.
-    // Since weight is stored as [in_dim, out_dim] (row-major), 
-    // BLAS sees it as [out_dim, in_dim] (col-major).
-    
-    // So weight is actually M = W^T (where W is the logical [out, in] matrix).
-    // M has dimensions [in_dim, out_dim] in BLAS column-major view.
-    // We want y = W * x = M^T * x.
-    
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    
-    // cublasSgemv(handle, trans, m, n, alpha, A, lda, x, incx, beta, y, incy)
-    // We compute: y = A^T * x
-    // where A is [in_dim, out_dim].
-    // m = rows of A = in_dim
-    // n = cols of A = out_dim
-    // lda = rows of A = in_dim
-    
-    cublasStatus_t status = cublasSgemv(cublas_handle, CUBLAS_OP_T, 
-                                        in_dim, out_dim, 
-                                        &alpha, weight, in_dim, 
-                                        in, 1, 
-                                        &beta, out, 1);
-                                        
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "cuBLAS Error in matmul\n");
-        exit(1);
+__global__ void matmul_kernel(float* out, float* in, float* weight, int in_dim, int out_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < out_dim) {
+        float sum = 0.0f;
+        for (int i = 0; i < in_dim; i++) {
+            sum += in[i] * weight[i * out_dim + idx];
+        }
+        out[idx] = sum;
     }
+}
+
+extern "C" void matmul(float* out, float* in, float* weight, int in_dim, int out_dim) {
+    int threads = 256;
+    int blocks = (out_dim + threads - 1) / threads;
+    matmul_kernel<<<blocks, threads>>>(out, in, weight, in_dim, out_dim);
+    cudaCheck(cudaGetLastError());
 }
 
 // ===========================================================================

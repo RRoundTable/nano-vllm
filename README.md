@@ -105,9 +105,9 @@ nano-vllm/
 
 - [x] **Phase 1**: Naive CPU Inference & Visualization
 - [x] **Phase 2**: CUDA Kernels (Naive)
-- [ ] **Phase 3**: Tiled Attention Optimization
-- [x] **Phase 4**: PagedAttention (KV Cache Paging) - *Implemented for CPU & GPU*
-- [ ] **Phase 5**: Continuous Batching
+- [x] **Phase 3**: PagedAttention (KV Cache Paging) - *Implemented for CPU & GPU*
+- [ ] **Phase 4**: Continuous Batching
+- [ ] **Phase 5**: Chunked Prefill
 
 ## License
 
