@@ -31,6 +31,41 @@ void print_intensity(float val) {
     else log_printf(C_RED "@" C_RESET);
 }
 
+void visualize_scheduler_status(Sequence* seqs, int num_seqs) {
+    log_printf("\n[Scheduler Status]\n");
+    for (int i = 0; i < num_seqs; i++) {
+        log_printf("Seq %d: ", i);
+        
+        switch (seqs[i].status) {
+            case SEQ_WAITING:
+                log_printf(C_GRAY "[WAITING]" C_RESET " (Arrives at Step %d)", seqs[i].arrival_step);
+                break;
+            case SEQ_PREFILLING: {
+                int total = seqs[i].num_prompt_tokens;
+                int current = seqs[i].pos;
+                float progress = (float)current / total;
+                int bars = (int)(progress * 20);
+                
+                log_printf(C_YELLOW "[PREFILL]" C_RESET " (%3d/%3d) [", current, total);
+                for(int b=0; b<bars; b++) log_printf("=");
+                for(int b=bars; b<20; b++) log_printf(" ");
+                log_printf("]");
+                break;
+            }
+            case SEQ_DECODING: {
+                int gen = seqs[i].pos - seqs[i].num_prompt_tokens;
+                log_printf(C_GREEN "[DECODE ]" C_RESET " (Gen: %3d) " C_GREEN "Generating..." C_RESET, gen);
+                break;
+            }
+            case SEQ_FINISHED:
+                log_printf(C_BLUE "[DONE   ]" C_RESET " Finished.");
+                break;
+        }
+        log_printf("\n");
+    }
+    log_printf("\n");
+}
+
 void visualize_attention(float* att, int n_heads, int pos, int max_seq_len) {
     // Visualize only the first 4 heads to save space
     int heads_to_show = n_heads > 4 ? 4 : n_heads;
@@ -63,13 +98,17 @@ void visualize_attention(float* att, int n_heads, int pos, int max_seq_len) {
 
 // Mode: 0 = Linear (Naive), 1 = Paged (Block-based)
 void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr, int max_seq_len, int mode) {
+    
+    // 1. Show Scheduler Status first
+    visualize_scheduler_status(seqs, num_seqs);
+
     // Calculate real stats
     int total_used = 0;
     for (int i = 0; i < num_seqs; i++) {
         total_used += (seqs[i].pos + 1);
     }
 
-    log_printf("\n[Visualizer] Memory Breakdown (Mode: %s)\n", mode == 1 ? "Paged" : "Naive");
+    log_printf("[Visualizer] Memory Breakdown (Mode: %s)\n", mode == 1 ? "Paged" : "Naive");
 
     if (mode == 1) {
         // Paged View
@@ -85,12 +124,6 @@ void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr,
         int internal_frag = allocated_mem - total_used;
         int free_mem = total_alloc - allocated_mem;
         
-        log_printf("Reqs: ");
-        for(int i=0; i<num_seqs; i++) {
-            log_printf("[Req%d:%d Blks] ", i, seqs[i].table.num_blocks);
-        }
-        log_printf("\n\n");
-
         // Visualization Bar
         int bar_width = 50;
         // Normalized to Total Physical Pool Size
@@ -120,10 +153,6 @@ void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr,
         int total_alloc = num_seqs * max_seq_len; 
         int reserved_waste = total_alloc - total_used;
         
-        log_printf("Reqs: ");
-        for(int i=0; i<num_seqs; i++) log_printf("[Req%d:%d/%d] ", i, seqs[i].pos + 1, max_seq_len);
-        log_printf("\n\n");
-
         // Visualization Bar
         int bar_width = 50;
         int used_chars = (int)((float)total_used / total_alloc * bar_width);
@@ -140,4 +169,35 @@ void visualize_kv_cache_usage(Sequence* seqs, int num_seqs, KVCacheManager* mgr,
         log_printf("3. Internal Frag (Last Page) : 0 (N/A for Naive)\n");
     }
     log_printf("\n");
+}
+
+void visualize_final_timeline(char* history, int num_seqs, int total_steps, int max_steps_capacity) {
+    log_printf("\n=== Execution Timeline ===\n");
+    
+    // Print Header: 01 02 03 ...
+    // To save space, let's just print blocks and use tooltips logic in mind.
+    // Or simplified header
+    log_printf("Step: ");
+    for (int t = 0; t < total_steps; t++) {
+        if (t % 10 == 0) log_printf("%-2d", t);
+        else log_printf("  "); 
+    }
+    log_printf("\n");
+
+    for (int i = 0; i < num_seqs; i++) {
+        log_printf("Seq%d: ", i);
+        for (int t = 0; t < total_steps; t++) {
+            char status = history[i * max_steps_capacity + t];
+            switch (status) {
+                case 'P': log_printf(C_YELLOW "P " C_RESET); break;
+                case 'D': log_printf(C_GREEN "D " C_RESET); break;
+                case 'W': log_printf(C_GRAY ". " C_RESET); break;
+                case 'F': log_printf(C_BLUE "F " C_RESET); break;
+                default:  log_printf("  "); break;
+            }
+        }
+        log_printf("\n");
+    }
+    log_printf("Legend: " C_GRAY "." C_RESET "=Wait, " C_YELLOW "P" C_RESET "=Prefill, " C_GREEN "D" C_RESET "=Decode, " C_BLUE "F" C_RESET "=Finished\n");
+    log_printf("==========================\n\n");
 }

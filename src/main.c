@@ -14,6 +14,7 @@
 void load_model(Weights* w, Config* p, const char* checkpoint_path);
 void malloc_run_state(RunState* s, Config* p);
 void free_run_state(RunState* s);
+void visualize_final_timeline(char* history, int num_seqs, int total_steps, int max_steps_capacity);
 
 typedef struct {
     char *str;
@@ -168,7 +169,7 @@ void print_usage(char *prog_name) {
     printf("  -n <steps>   Number of generation steps (default: 64)\n");
     printf("  -i <prompt>  Input prompt (default: \"Hello, my name is\")\n");
     printf("  --paged      Enable paged attention mode\n");
-    printf("  --chunk-size <N>  Chunk size for prefill (default: Max)\n");
+    printf("  --chunk-size <N>  Chunk size for prefill (default: 10 if not set)\n");
     printf("\n");
 }
 
@@ -237,25 +238,34 @@ int main(int argc, char** argv) {
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
     
-    // Define Batches
-    int BATCH_SIZE = 4;
-    // If user provided a prompt, use it for first seq, else default.
-    char* prompts[4] = {
-        user_prompt ? user_prompt : "Hello, my name is",
-        "The quick brown fox jumps over",
-        "Once upon a time in a distant land",
-        "To be or not to be, that is"
+    // Define Batches: Long vs Short Race
+    int BATCH_SIZE = 2;
+    
+    // Construct Long Prompt (programmatically)
+    // 50 reps of "Hello world " should be around 100 tokens.
+    // If we use stories15M vocab, "Hello" " world" are likely tokens.
+    char* long_prompt = (char*)malloc(2048);
+    long_prompt[0] = '\0';
+    for(int i=0; i<50; i++) {
+        strcat(long_prompt, "Once upon a time "); 
+    }
+    
+    char* prompts[2] = {
+        long_prompt,      // Seq 0: Long
+        "Who are you?"    // Seq 1: Short
     };
-    // Different lengths for interest
-    int steps_per_seq[4] = { steps, steps + 20, steps - 10, steps + 50 }; 
-    if (steps_per_seq[2] < 10) steps_per_seq[2] = 10;
+    
+    int arrival_steps[2] = { 0, 5 }; // Seq 1 arrives late
+    int steps_per_seq[2] = { 10, 10 }; // Just generate a few tokens
     
     // Initialize Sequences
-    Sequence seqs[4];
+    Sequence seqs[2];
     
     for(int i=0; i<BATCH_SIZE; i++) {
         seqs[i].id = i;
-        seqs[i].active = 1;
+        seqs[i].active = 0; // Starts Inactive (Waiting)
+        seqs[i].status = SEQ_WAITING;
+        seqs[i].arrival_step = arrival_steps[i];
         seqs[i].pos = 0;
         seqs[i].seq_len = steps_per_seq[i]; // Total steps to generate
         
@@ -264,7 +274,7 @@ int main(int argc, char** argv) {
         malloc_run_state(seqs[i].state, &config);
         
         // Alloc History
-        seqs[i].output_history = (int*)malloc(seqs[i].seq_len * sizeof(int));
+        seqs[i].output_history = (int*)malloc((2048 + steps) * sizeof(int)); // Safe large size
 
         // BlockTable Init (Wait until paged manager init)
     }
@@ -276,7 +286,6 @@ int main(int argc, char** argv) {
         int total_needed_blocks = 0;
         for(int i=0; i<BATCH_SIZE; i++) {
             // Approx max len = max_seq_len (or actual seq_len)
-            // Let's reserve enough for max_seq_len for safety in demo
             int needed = (config.max_seq_len + block_size - 1) / block_size;
             total_needed_blocks += needed;
         }
@@ -316,19 +325,16 @@ int main(int argc, char** argv) {
         seqs[i].current_token = seqs[i].prompt_tokens[0]; // Start token
         
         // Init history with prompt
-        // Note: seq_len might be smaller than prompt if user sets very small steps, handle that?
-        // Assuming seq_len >= num_prompt_tokens for now or just filling what fits.
-        for(int j=0; j<seqs[i].num_prompt_tokens && j < seqs[i].seq_len; j++) {
+        for(int j=0; j<seqs[i].num_prompt_tokens; j++) {
             seqs[i].output_history[j] = seqs[i].prompt_tokens[j];
         }
+        // Adjust seq_len to be prompt len + generated steps
+        seqs[i].seq_len = seqs[i].num_prompt_tokens + steps;
     }
 
-    log_printf("Starting Multi-Sequence Inference (%d sequences)...\n", BATCH_SIZE);
-    if (chunk_size < INT_MAX) {
-        log_printf("Mode: Chunked Prefill (Size: %d)\n", chunk_size);
-    } else {
-        log_printf("Mode: Full Sequence Prefill\n");
-    }
+    log_printf("Starting Interactive Scheduler Demo (Chunk Size: %d)\n", chunk_size);
+    log_printf("Seq 0 (Long): %d tokens (Arrives Step 0)\n", seqs[0].num_prompt_tokens);
+    log_printf("Seq 1 (Short): %d tokens (Arrives Step 5)\n", seqs[1].num_prompt_tokens);
     
     if (g_visualize_paged) {
         log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
@@ -338,25 +344,57 @@ int main(int argc, char** argv) {
 
     clock_t start = clock();
     
-    int any_active = 1;
     int global_step = 0;
+    int all_finished = 0;
+    
+    // Timeline History
+    int history_capacity = 1024;
+    char* history_log = (char*)malloc(BATCH_SIZE * history_capacity * sizeof(char));
+    for(int i=0; i<BATCH_SIZE * history_capacity; i++) history_log[i] = ' ';
     
     // Main Batch Loop
-    while (any_active) {
-        any_active = 0;
+    while (!all_finished) {
+        all_finished = 1;
         log_printf("\n--- Step %d ---\n", global_step);
         
+        int active_count = 0;
+        
         for (int i = 0; i < BATCH_SIZE; i++) {
-            if (!seqs[i].active) continue;
-            any_active = 1;
+            // Check Arrival
+            if (global_step < seqs[i].arrival_step) {
+                // Not arrived yet
+                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'W';
+                all_finished = 0; // Keep loop running
+                continue;
+            }
+            
+            // Activate if waiting
+            if (seqs[i].status == SEQ_WAITING) {
+                seqs[i].active = 1;
+                seqs[i].status = SEQ_PREFILLING;
+                log_printf(">>> [Scheduler] Seq %d ARRIVED! (Prompt: %d tokens)\n", i, seqs[i].num_prompt_tokens);
+            }
+            
+            if (seqs[i].status == SEQ_FINISHED) {
+                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'F';
+                continue;
+            }
+            
+            all_finished = 0;
+            active_count++;
             
             // Check if we are in Prefill Phase or Decode Phase
-            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1); // If pos is before last prompt token
+            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1); 
             
             if (is_prefill) {
                 // --- CHUNKED PREFILL ---
+                seqs[i].status = SEQ_PREFILLING;
+                
+                // Record to History
+                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'P';
+
                 int start_pos = seqs[i].pos;
-                int end_pos = seqs[i].num_prompt_tokens; // Exclusive
+                int end_pos = seqs[i].num_prompt_tokens; 
                 int remaining = end_pos - start_pos;
                 int n_tokens = (remaining > chunk_size) ? chunk_size : remaining;
                 
@@ -369,24 +407,13 @@ int main(int argc, char** argv) {
                 // Update position
                 seqs[i].pos += n_tokens; 
                 
-                // Update current_token to the last processed one
+                // Update current_token
                 seqs[i].current_token = chunk_ptr[n_tokens - 1];
-                
-                // Check if we finished the prompt
-                // We finished if pos reached (num_prompt_tokens)
-                // Wait, logic:
-                // If we processed up to num_prompt_tokens, we are done with prefill.
-                // But `is_prefill` condition was `pos < num_prompt - 1`.
-                // If we processed everything, `pos` will be `num_prompt`.
-                
-                // However, we want to Sample ONLY if we processed the LAST token of the prompt.
-                // The last token of the prompt is at index `num_prompt_tokens - 1`.
-                // If our chunk INCLUDED this last token, then we can sample.
                 
                 int finished_prompt = (seqs[i].pos >= seqs[i].num_prompt_tokens);
                 
                 if (finished_prompt) {
-                    // Sample next token
+                    // Sample next token (First Generation)
                     float* host_logits;
                     #if defined(__CUDACC__) || defined(NANO_CUDA)
                         host_logits = (float*)malloc(config.vocab_size * sizeof(float));
@@ -410,21 +437,24 @@ int main(int argc, char** argv) {
                     }
                     
                     seqs[i].current_token = next_token;
-                    // pos is already at the new slot
+                    seqs[i].status = SEQ_DECODING;
+                    
                 } else {
-                    // Not finished yet, just log
                     log_printf("[Seq %d] Processed Chunk (%d tokens). Pos: %d/%d\n", i, n_tokens, seqs[i].pos, seqs[i].num_prompt_tokens);
                 }
                 
             } else {
                 // --- DECODE PHASE (Single Token) ---
+                seqs[i].status = SEQ_DECODING;
+                
+                // Record to History
+                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'D';
+
                 BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
                 
-                // Pass single token as pointer
                 int token_arr[1] = { seqs[i].current_token };
                 transformer(token_arr, 1, seqs[i].pos, &config, seqs[i].state, &weights, bt_ptr);
                 
-                // Sample
                 float* host_logits;
                 #if defined(__CUDACC__) || defined(NANO_CUDA)
                     host_logits = (float*)malloc(config.vocab_size * sizeof(float));
@@ -439,16 +469,13 @@ int main(int argc, char** argv) {
                     free(host_logits);
                 #endif
                 
-                // Print
                 const char* text = decode_token(&tokenizer, next_token);
                 log_printf("[Seq %d]: %s\n", i, text);
                 
-                // Update History
                 if (seqs[i].pos + 1 < seqs[i].seq_len) {
                     seqs[i].output_history[seqs[i].pos + 1] = next_token;
                 }
                 
-                // Update State
                 seqs[i].current_token = next_token;
                 seqs[i].pos++;
             }
@@ -456,29 +483,35 @@ int main(int argc, char** argv) {
             // Check Finish
             if (seqs[i].pos >= seqs[i].seq_len) {
                 seqs[i].active = 0;
+                seqs[i].status = SEQ_FINISHED;
                 log_printf("[Seq %d] FINISHED.\n", i);
             }
         }
         
-        // Visualize Memory State (Once per step, after all seqs updated)
-        if (any_active && global_step % 1 == 0) { // Visualize every step
+        // Visualize Memory State
+        if (active_count > 0 || global_step < 10) { // Keep visualizing for a bit
              visualize_kv_cache_usage(seqs, BATCH_SIZE, &g_kv_manager, config.max_seq_len, g_visualize_paged);
         }
         global_step++;
+        
+        // Safety break
+        if (global_step > 500) break;
     }
     
     log_printf("\nAll sequences finished.\n");
+    
+    // VISUALIZE TIMELINE
+    visualize_final_timeline(history_log, BATCH_SIZE, global_step, history_capacity);
     
     // Print Final Summaries
     log_printf("\n=== Final Generated Sequences ===\n");
     for(int i=0; i<BATCH_SIZE; i++) {
         log_printf("[Seq %d]: ", i);
-        for(int j=0; j<seqs[i].seq_len; j++) {
-            // Note: decode_token returns a static buffer, so we must print immediately or copy
-            // Also, some tokens might be partial or special, but decode_token handles basic piece lookup
-            // If pos < seq_len (finished early?), we should use seqs[i].pos
-            if (j > seqs[i].pos) break;
-            
+        // Be careful with seq_len vs pos
+        int max_print = seqs[i].pos; 
+        if (max_print > seqs[i].seq_len) max_print = seqs[i].seq_len;
+        
+        for(int j=0; j<max_print; j++) {
             const char* text = decode_token(&tokenizer, seqs[i].output_history[j]);
             log_printf("%s", text);
         }
@@ -491,6 +524,8 @@ int main(int argc, char** argv) {
     log_printf("Time: %.2fs\n", time_spent);
 
     // Cleanup
+    free(history_log);
+    free(long_prompt);
     free_tokenizer(&tokenizer);
     for(int i=0; i<BATCH_SIZE; i++) {
         free_run_state(seqs[i].state);
