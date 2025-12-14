@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
     }
     
     const char* model_path = argv[1];
-    int steps = 64; // Default reduced for multi-seq demo
+    int steps = 1; // Default reduced for multi-seq demo
     float temperature = 1.0f;
     float topp = 0.9f;
     char *user_prompt = NULL; // If user provides specific prompt
@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
     };
     
     int arrival_steps[2] = { 0, 5 }; // Seq 1 arrives late
-    int steps_per_seq[2] = { 10, 10 }; // Just generate a few tokens
+    int steps_per_seq[2] = { steps, steps }; // Just generate a few tokens
     
     // Initialize Sequences
     Sequence seqs[2];
