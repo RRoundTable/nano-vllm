@@ -302,7 +302,7 @@ void malloc_run_state(RunState* s, Config* p) {
     check_status(device_malloc((void**)&s->k, max_batch_size * dim * sizeof(float)));
     check_status(device_malloc((void**)&s->v, max_batch_size * dim * sizeof(float)));
     check_status(device_malloc((void**)&s->att, n_heads * max_seq_len * sizeof(float))); // Reused per token
-    check_status(device_malloc((void**)&s->logits, vocab_size * sizeof(float))); // Only need logits for the last token
+    check_status(device_malloc((void**)&s->logits, max_batch_size * vocab_size * sizeof(float))); // Logits for batch
     
     // KV Cache
     if (!g_paged_mode) {

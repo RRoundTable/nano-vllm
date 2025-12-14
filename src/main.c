@@ -58,107 +58,85 @@ KVCacheManager g_kv_manager;
 
 // Refactored Transformer to support Batched Processing
 void transformer(int* tokens, int num_tokens, int pos, Config* p, RunState* s, Weights* w, BlockTable* bt) {
-    
-    // Scheduler Logic: Allocate new block if needed (Only in Paged Mode)
-    // NOTE: For batched processing, we might need multiple blocks.
-    // For now, let's assume one block allocation per call or enough capacity.
-    // In strict PagedAttention, we check block boundaries for EACH token.
-    if (g_paged_mode) {
-        int block_size = g_kv_manager.block_size;
-        for (int t = 0; t < num_tokens; t++) {
-            int current_pos = pos + t;
-            if (current_pos % block_size == 0) {
-                // Need a new block for this position
-                int new_block = alloc_block(&g_kv_manager);
-                if (new_block == -1) {
-                    printf("Error: Out of KV Cache blocks!\n");
-                    exit(1);
-                }
-                int logical_idx = current_pos / block_size;
-                bt->block_indices[logical_idx] = new_block;
-                bt->num_blocks++;
-            }
-        }
-    }
+    // Deprecated for continuous batching, but kept for reference or single-seq fallback
+    // ... (Original logic omitted for brevity if not used) ...
+    printf("Error: Old transformer called in Continuous Batching mode.\n");
+    exit(1);
+}
 
-    // 1. Embedding (Batched)
+// Batched Transformer
+void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids, 
+                       int* output_indices, int num_outputs,
+                       Config* p, RunState* s, Weights* w, BlockTable** block_tables) {
+    
+    // 1. Embedding
     for (int t = 0; t < num_tokens; t++) {
         float* content_row = w->token_embedding_table + tokens[t] * p->dim;
-        // Copy to s->x + t * dim
         check_status(device_memcpy(s->x + t * p->dim, content_row, p->dim * sizeof(float), DEVICE_TO_DEVICE));
     }
     
-    // 2. Forward layers
+    // 2. Layers
     for(int i = 0; i < p->n_layers; i++) {
         LayerWeights* l = &w->layers[i];
         
-        // Attention Block
-        // a. RMSNorm (Batched)
         rms_norm(s->xb, s->x, l->rms_att_weight, p->dim, num_tokens, 1e-5f);
         
-        // b. QKV Matmuls (Batched: [num_tokens, dim] @ [dim, head_dim...])
         matmul(s->q, s->xb, l->wq, num_tokens, p->dim, p->n_heads * p->head_dim);
         matmul(s->k, s->xb, l->wk, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
         matmul(s->v, s->xb, l->wv, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
         
-        // c. RoPE (Batched)
-        apply_rope(s->q, s->k, pos, p->rope_theta, p->head_dim, num_tokens, p->n_heads, p->n_kv_heads);
+        // Batched RoPE with pos_arr
+        apply_rope_batch(s->q, s->k, pos_arr, p->rope_theta, p->head_dim, num_tokens, p->n_heads, p->n_kv_heads);
         
-        // d. KV Cache Update (Batched)
+        // KV Update Paged Batch
         if (g_paged_mode) {
-            update_kv_cache_paged(&g_kv_manager, bt, s->k, s->v, 
-                                  i, pos, p->n_kv_heads, p->head_dim, num_tokens);
+             update_kv_cache_paged_batch(&g_kv_manager, block_tables, seq_ids, s->k, s->v, 
+                                  i, pos_arr, p->n_kv_heads, p->head_dim, num_tokens);
         } else {
-            update_kv_cache(s->key_cache, s->value_cache, s->k, s->v, 
-                            i, pos, p->max_seq_len, p->n_kv_heads, p->head_dim, num_tokens);
+             printf("Error: Continuous batching requires paged mode.\n");
+             exit(1);
         }
         
-        // e. Multi-Head Attention (Batched)
-        // out = xb2 (reusing buffer)
+        // Attention Batch
         if (g_paged_mode) {
-            paged_attention(s->xb2, s->q, &g_kv_manager, bt, s->att,
-                            i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
-        } else {
-            multi_head_attention(s->xb2, s->q, s->key_cache, s->value_cache, s->att,
-                                 i, pos, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
+            paged_attention_batch(s->xb2, s->q, &g_kv_manager, block_tables, seq_ids, s->att,
+                            i, pos_arr, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
         }
         
-        // f. Output Projection (Batched)
         matmul(s->xb, s->xb2, l->wo, num_tokens, p->n_heads * p->head_dim, p->dim);
-        
-        // g. Residual Connection (Batched)
         accum(s->x, s->xb, num_tokens * p->dim);
         
-        // FFN Block
-        // a. RMSNorm
         rms_norm(s->xb, s->x, l->rms_ffn_weight, p->dim, num_tokens, 1e-5f);
-        
-        // b. Gate & Up
         matmul(s->hb, s->xb, l->w_gate, num_tokens, p->dim, p->hidden_dim);
         matmul(s->hb2, s->xb, l->w_up, num_tokens, p->dim, p->hidden_dim);
-        
-        // c. SwiGLU
-        swiglu(s->hb, s->hb, s->hb2, p->hidden_dim, num_tokens); // Result in hb
-        
-        // d. Down Projection
+        swiglu(s->hb, s->hb, s->hb2, p->hidden_dim, num_tokens);
         matmul(s->xb, s->hb, l->w_down, num_tokens, p->hidden_dim, p->dim);
-        
-        // e. Residual Connection
         accum(s->x, s->xb, num_tokens * p->dim);
     }
     
-    // 3. Final RMSNorm (Batched)
     rms_norm(s->x, s->x, w->rms_final_weight, p->dim, num_tokens, 1e-5f);
+
+    // Compute Logits ONLY for output indices
+    // We reuse s->logits buffer. It is size [max_batch_size * vocab_size].
+    // We map output index k (0..num_outputs-1) to the location in s->logits.
+    // The source embedding is at s->x + output_indices[k] * dim.
     
-    // 4. Classifier (LM Head)
-    // Optimization: We only need the logits for the LAST token in the batch to predict the next token.
-    // However, if we wanted to support "prefill" phase output for all tokens, we would compute all.
-    // Let's compute ONLY for the last token to save time, as we only sample from the last one.
-    // The last token is at index (num_tokens - 1).
-    float* last_token_embedding = s->x + (num_tokens - 1) * p->dim;
+    // We can do a batched matmul if we gather the embeddings?
+    // Or just loop. Since num_outputs is usually small (BATCH_SIZE), loop is fine.
+    // OR we can use the fact that `matmul` supports batching.
+    // If output_indices are contiguous at the end (often true for decode), we could optimize.
+    // But for general ragged batch, they might be scattered.
+    // Let's gather embeddings into s->xb (reuse buffer) or s->xb2?
+    // s->xb is [max_batch * dim]. Safe to use for first num_outputs.
     
-    // We treat this as a batch of size 1 for the classifier
-    matmul(s->logits, last_token_embedding, w->lm_head, 1, p->dim, p->vocab_size);
+    for(int k=0; k<num_outputs; k++) {
+        int token_idx = output_indices[k];
+        check_status(device_memcpy(s->xb + k * p->dim, s->x + token_idx * p->dim, p->dim * sizeof(float), DEVICE_TO_DEVICE));
+    }
+    
+    // Matmul: [num_outputs, dim] @ [vocab, dim]^T -> [num_outputs, vocab]
+    // s->logits will store the result.
+    matmul(s->logits, s->xb, w->lm_head, num_outputs, p->dim, p->vocab_size);
 }
 
 void print_usage(char *prog_name) {
@@ -168,7 +146,7 @@ void print_usage(char *prog_name) {
     printf("  -p <topp>    Top-p value (default: 0.9)\n");
     printf("  -n <steps>   Number of generation steps (default: 64)\n");
     printf("  -i <prompt>  Input prompt (default: \"Hello, my name is\")\n");
-    printf("  --paged      Enable paged attention mode\n");
+    printf("  --paged      Enable paged attention mode (Required for Continuous Batching)\n");
     printf("  --chunk-size <N>  Chunk size for prefill (default: 10 if not set)\n");
     printf("\n");
 }
@@ -183,7 +161,7 @@ int main(int argc, char** argv) {
     int steps = 1; // Default reduced for multi-seq demo
     float temperature = 1.0f;
     float topp = 0.9f;
-    char *user_prompt = NULL; // If user provides specific prompt
+    // char *user_prompt = NULL; // If user provides specific prompt
     int chunk_size = INT_MAX; // Default: Full Sequence Prefill
 
     // Argument parsing
@@ -198,7 +176,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) { steps = atoi(argv[++i]); }
         }
         else if (strcmp(argv[i], "-i") == 0) {
-            if (i + 1 < argc) { user_prompt = argv[++i]; }
+            // if (i + 1 < argc) { user_prompt = argv[++i]; }
+            i++; // skip
         }
         else if (strcmp(argv[i], "--paged") == 0) {
             g_visualize_paged = 1;
@@ -208,7 +187,6 @@ int main(int argc, char** argv) {
             if (i + 1 < argc) { chunk_size = atoi(argv[++i]); }
         }
         else if (i == 2 && isdigit(argv[i][0])) {
-            // Compatibility with old positional arg [steps]
             steps = atoi(argv[i]);
         }
         else {
@@ -216,6 +194,12 @@ int main(int argc, char** argv) {
             print_usage(argv[0]);
             return 1;
         }
+    }
+    
+    if (!g_paged_mode) {
+        printf("WARNING: Enabling Paged Attention automatically for Continuous Batching.\n");
+        g_visualize_paged = 1;
+        g_paged_mode = 1;
     }
     
     // Validation
@@ -231,12 +215,16 @@ int main(int argc, char** argv) {
 
     Config config;
     Weights weights;
-    // RunState state; // REPLACED by Sequence.state
     Tokenizer tokenizer;
     Sampler sampler;
 
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
+    
+    // Batch State (Global Workspace)
+    RunState batch_state;
+    malloc_run_state(&batch_state, &config); // Allocates max_seq_len capacity
+    int MAX_BATCH_CAPACITY = config.max_seq_len; // Safe upper bound
     
     // Define Batches: Long vs Short Race
     int BATCH_SIZE = 2;
@@ -264,23 +252,21 @@ int main(int argc, char** argv) {
         seqs[i].pos = 0;
         seqs[i].seq_len = steps_per_seq[i]; // Total steps to generate
         
-        // Alloc State
-        seqs[i].state = (RunState*)malloc(sizeof(RunState));
-        malloc_run_state(seqs[i].state, &config);
+        // We do NOT use seqs[i].state for computation anymore.
+        // We only use it to store minimal state if needed, or just NULL it.
+        // But the struct expects it? Let's allocate it just to avoid null pointers in cleanup if we want, 
+        // but for now we won't use it.
+        seqs[i].state = NULL; 
         
         // Alloc History
         seqs[i].output_history = (int*)malloc((2048 + steps) * sizeof(int)); // Safe large size
-
-        // BlockTable Init (Wait until paged manager init)
     }
     
     // Phase 3: Initialize PagedAttention
     if (g_paged_mode) {
         int block_size = 16;
-        // Total blocks = Sum of max needs for all seqs
         int total_needed_blocks = 0;
         for(int i=0; i<BATCH_SIZE; i++) {
-            // Approx max len = max_seq_len (or actual seq_len)
             int needed = (config.max_seq_len + block_size - 1) / block_size;
             total_needed_blocks += needed;
         }
@@ -297,7 +283,7 @@ int main(int argc, char** argv) {
         log_printf("PagedAttention Initialized (Block Size: %d, Pool: %d blocks)\n", block_size, total_needed_blocks);
     }
     
-    // Build tokenizer path
+    // Build tokenizer
     char tokenizer_path[1024];
     const char* last_slash = strrchr(model_path, '/');
     if (last_slash != NULL) {
@@ -310,33 +296,24 @@ int main(int argc, char** argv) {
     }
     
     build_tokenizer(&tokenizer, tokenizer_path, config.vocab_size);
-    build_sampler(&sampler, config.vocab_size, temperature, topp, (unsigned long long)time(NULL)); // Seed with time
+    build_sampler(&sampler, config.vocab_size, temperature, topp, (unsigned long long)time(NULL)); 
     
     // Encode Prompts
     for(int i=0; i<BATCH_SIZE; i++) {
-        // +3 for '\0', ?BOS, ?EOS
         seqs[i].prompt_tokens = (int*)malloc((strlen(prompts[i]) + 3) * sizeof(int)); 
         encode(&tokenizer, prompts[i], 1, 0, seqs[i].prompt_tokens, &seqs[i].num_prompt_tokens);
-        seqs[i].current_token = seqs[i].prompt_tokens[0]; // Start token
+        seqs[i].current_token = seqs[i].prompt_tokens[0]; 
         
-        // Init history with prompt
         for(int j=0; j<seqs[i].num_prompt_tokens; j++) {
             seqs[i].output_history[j] = seqs[i].prompt_tokens[j];
         }
-        // Adjust seq_len to be prompt len + generated steps
         seqs[i].seq_len = seqs[i].num_prompt_tokens + steps;
     }
 
-    log_printf("Starting Interactive Scheduler Demo (Chunk Size: %d)\n", chunk_size);
+    log_printf("Starting Continuous Batching (Ragged) Demo (Chunk Size: %d)\n", chunk_size);
     log_printf("Seq 0 (Long): %d tokens (Arrives Step 0)\n", seqs[0].num_prompt_tokens);
     log_printf("Seq 1 (Short): %d tokens (Arrives Step 5)\n", seqs[1].num_prompt_tokens);
     
-    if (g_visualize_paged) {
-        log_printf("Visualization Mode: Paged KV Cache (REAL LOGIC)\n");
-    } else {
-        log_printf("Visualization Mode: Linear KV Cache (Naive)\n");
-    }
-
     clock_t start = clock();
     
     int global_step = 0;
@@ -347,27 +324,40 @@ int main(int argc, char** argv) {
     char* history_log = (char*)malloc(BATCH_SIZE * history_capacity * sizeof(char));
     for(int i=0; i<BATCH_SIZE * history_capacity; i++) history_log[i] = ' ';
     
+    // Batch Buffers
+    int* batch_tokens = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
+    int* batch_pos = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
+    int* batch_seq_ids = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
+    int* batch_output_indices = (int*)malloc(BATCH_SIZE * sizeof(int)); // Max 1 output per seq per step
+    BlockTable** batch_block_tables = (BlockTable**)malloc(BATCH_SIZE * sizeof(BlockTable*));
+    
+    // Initialize BlockTable ptrs
+    for(int i=0; i<BATCH_SIZE; i++) batch_block_tables[i] = &seqs[i].table;
+
     // Main Batch Loop
     while (!all_finished) {
         all_finished = 1;
+        
+        // Reset Batch Counters
+        int batch_count = 0;
+        int output_count = 0;
+        
         log_printf("\n--- Step %d ---\n", global_step);
         
-        int active_count = 0;
-        
+        // 1. Scheduler Phase: Collect Tokens
         for (int i = 0; i < BATCH_SIZE; i++) {
-            // Check Arrival
+             // Check Arrival
             if (global_step < seqs[i].arrival_step) {
-                // Not arrived yet
                 if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'W';
-                all_finished = 0; // Keep loop running
+                all_finished = 0;
                 continue;
             }
             
-            // Activate if waiting
+            // Activate
             if (seqs[i].status == SEQ_WAITING) {
                 seqs[i].active = 1;
                 seqs[i].status = SEQ_PREFILLING;
-                log_printf(">>> [Scheduler] Seq %d ARRIVED! (Prompt: %d tokens)\n", i, seqs[i].num_prompt_tokens);
+                log_printf(">>> [Scheduler] Seq %d ARRIVED!\n", i);
             }
             
             if (seqs[i].status == SEQ_FINISHED) {
@@ -375,121 +365,158 @@ int main(int argc, char** argv) {
                 continue;
             }
             
-            all_finished = 0;
-            active_count++;
+            all_finished = 0; // At least one running
             
-            // Check if we are in Prefill Phase or Decode Phase
-            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1); 
+            // Decide how many tokens to add
+            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1);
+            int n_tokens = 0;
+            int start_pos = seqs[i].pos;
+            int* token_ptr = NULL;
             
             if (is_prefill) {
-                // --- CHUNKED PREFILL ---
                 seqs[i].status = SEQ_PREFILLING;
-                
-                // Record to History
                 if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'P';
-
-                int start_pos = seqs[i].pos;
-                int end_pos = seqs[i].num_prompt_tokens; 
+                
+                int end_pos = seqs[i].num_prompt_tokens;
                 int remaining = end_pos - start_pos;
-                int n_tokens = (remaining > chunk_size) ? chunk_size : remaining;
-                
-                // Point to the chunk of tokens
-                int* chunk_ptr = seqs[i].prompt_tokens + start_pos;
-                
-                BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
-                transformer(chunk_ptr, n_tokens, start_pos, &config, seqs[i].state, &weights, bt_ptr);
-                
-                // Update position
-                seqs[i].pos += n_tokens; 
-                
-                // Update current_token
-                seqs[i].current_token = chunk_ptr[n_tokens - 1];
-                
-                int finished_prompt = (seqs[i].pos >= seqs[i].num_prompt_tokens);
-                
-                if (finished_prompt) {
-                    // Sample next token (First Generation)
-                    float* host_logits;
-                    #if defined(__CUDACC__) || defined(NANO_CUDA)
-                        host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-                        check_status(device_memcpy(host_logits, seqs[i].state->logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
-                    #else
-                        host_logits = seqs[i].state->logits;
-                    #endif
-                    
-                    int next_token = sample(&sampler, host_logits);
-                    
-                    #if defined(__CUDACC__) || defined(NANO_CUDA)
-                        free(host_logits);
-                    #endif
-                    
-                    // Log and Store
-                    const char* text = decode_token(&tokenizer, next_token);
-                    log_printf("[Seq %d] PREFILL COMPLETE (%d tokens). First Gen: %s\n", i, n_tokens, text);
-                    
-                    if (seqs[i].pos < seqs[i].seq_len) {
-                        seqs[i].output_history[seqs[i].pos] = next_token;
-                    }
-                    
-                    seqs[i].current_token = next_token;
-                    seqs[i].status = SEQ_DECODING;
-                    
-                } else {
-                    log_printf("[Seq %d] Processed Chunk (%d tokens). Pos: %d/%d\n", i, n_tokens, seqs[i].pos, seqs[i].num_prompt_tokens);
-                }
+                n_tokens = (remaining > chunk_size) ? chunk_size : remaining;
+                token_ptr = seqs[i].prompt_tokens + start_pos;
                 
             } else {
-                // --- DECODE PHASE (Single Token) ---
                 seqs[i].status = SEQ_DECODING;
-                
-                // Record to History
                 if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'D';
-
-                BlockTable* bt_ptr = g_paged_mode ? &seqs[i].table : NULL;
                 
-                int token_arr[1] = { seqs[i].current_token };
-                transformer(token_arr, 1, seqs[i].pos, &config, seqs[i].state, &weights, bt_ptr);
-                
-                float* host_logits;
-                #if defined(__CUDACC__) || defined(NANO_CUDA)
-                    host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-                    check_status(device_memcpy(host_logits, seqs[i].state->logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
-                #else
-                    host_logits = seqs[i].state->logits;
-                #endif
-                
-                int next_token = sample(&sampler, host_logits);
-                
-                #if defined(__CUDACC__) || defined(NANO_CUDA)
-                    free(host_logits);
-                #endif
-                
-                const char* text = decode_token(&tokenizer, next_token);
-                log_printf("[Seq %d]: %s\n", i, text);
-                
-                if (seqs[i].pos + 1 < seqs[i].seq_len) {
-                    seqs[i].output_history[seqs[i].pos + 1] = next_token;
-                }
-                
-                seqs[i].current_token = next_token;
-                seqs[i].pos++;
+                n_tokens = 1;
+                token_ptr = &seqs[i].current_token;
             }
             
-            // Check Finish
-            if (seqs[i].pos >= seqs[i].seq_len) {
-                seqs[i].active = 0;
-                seqs[i].status = SEQ_FINISHED;
-                log_printf("[Seq %d] FINISHED.\n", i);
+            // Check Capacity
+            if (batch_count + n_tokens > MAX_BATCH_CAPACITY) {
+                log_printf("WARNING: Batch capacity reached! Skipping Seq %d this step.\n", i);
+                continue; // Wait for next step
+            }
+            
+            // Alloc Blocks if needed (for Paged Attention)
+            // We check each token position
+            int block_size = g_kv_manager.block_size;
+            for (int t = 0; t < n_tokens; t++) {
+                int current_pos = start_pos + t;
+                if (current_pos % block_size == 0) {
+                    int new_block = alloc_block(&g_kv_manager);
+                    if (new_block == -1) {
+                        printf("Error: Out of KV Cache blocks!\n");
+                        exit(1);
+                    }
+                    int logical_idx = current_pos / block_size;
+                    seqs[i].table.block_indices[logical_idx] = new_block;
+                    seqs[i].table.num_blocks++;
+                }
+            }
+            
+            // Add to Batch
+            for (int t = 0; t < n_tokens; t++) {
+                batch_tokens[batch_count + t] = token_ptr[t];
+                batch_pos[batch_count + t] = start_pos + t;
+                batch_seq_ids[batch_count + t] = i;
+            }
+            
+            // Mark Output Request
+            // We want logits for the LAST token of this chunk
+            // The index in the batch is (batch_count + n_tokens - 1)
+            // BUT wait: sample() needs logits for this seq.
+            // We can map output i -> batch index.
+            // Let's store: "For this sequence i, the logits are at batch index X"
+            // Actually, `transformer_batch` computes logits for indices in `output_indices`.
+            // So we add (batch_count + n_tokens - 1) to `batch_output_indices`.
+            // AND we need to know which sequence that belongs to.
+            // Let's rely on `i` loop order?
+            // Better: `batch_output_seq_ids[output_count]` ? 
+            // Or just know that `batch_output_indices[k]` corresponds to `output_seq_ids[k]`.
+            // Let's keep a local array `active_seq_ids` matching output_indices.
+            
+            batch_output_indices[output_count] = batch_count + n_tokens - 1;
+            // batch_output_seq_ids[output_count] = i; // implicit if we iterate active seqs again? No.
+            // Let's use `batch_seq_ids` of the output token to identify the sequence.
+            
+            output_count++;
+            batch_count += n_tokens;
+            
+            // Advance Seq Position Speculatively? 
+            // Yes, assuming success.
+            seqs[i].pos += n_tokens;
+            
+            if (is_prefill) {
+                 seqs[i].current_token = token_ptr[n_tokens - 1]; // Last token of chunk
+            }
+        }
+        
+        if (batch_count == 0 && !all_finished) {
+            // Everyone waiting?
+            global_step++;
+            continue;
+        }
+        
+        if (all_finished) break;
+        
+        // 2. Inference
+        transformer_batch(batch_tokens, batch_count, batch_pos, batch_seq_ids, 
+                          batch_output_indices, output_count,
+                          &config, &batch_state, &weights, batch_block_tables);
+                          
+        // 3. Sampling & Update
+        for (int k = 0; k < output_count; k++) {
+            int batch_idx = batch_output_indices[k];
+            int seq_id = batch_seq_ids[batch_idx];
+            
+            // Logits are in batch_state.logits[k * vocab_size]
+            float* logits = batch_state.logits + k * config.vocab_size;
+            
+            // Sample
+            float* host_logits;
+            #if defined(__CUDACC__) || defined(NANO_CUDA)
+                host_logits = (float*)malloc(config.vocab_size * sizeof(float));
+                check_status(device_memcpy(host_logits, logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
+            #else
+                host_logits = logits;
+            #endif
+            
+            int next_token = sample(&sampler, host_logits);
+            
+            #if defined(__CUDACC__) || defined(NANO_CUDA)
+                free(host_logits);
+            #endif
+            
+            // Process Result
+            // Check if we just finished a prompt
+            // int was_prefill = (seqs[seq_id].pos <= seqs[seq_id].num_prompt_tokens); 
+            // actually we already advanced `pos` by `n_tokens`.
+            
+            // Log
+            // const char* text = decode_token(&tokenizer, next_token);
+            // log_printf("[Seq %d] Gen: %s\n", seq_id, text);
+            
+            // Store
+            if (seqs[seq_id].pos < seqs[seq_id].seq_len) {
+                 seqs[seq_id].output_history[seqs[seq_id].pos] = next_token;
+            }
+            
+            // Update current token for next step
+            seqs[seq_id].current_token = next_token;
+            
+             // Check Finish
+            if (seqs[seq_id].pos >= seqs[seq_id].seq_len) {
+                seqs[seq_id].active = 0;
+                seqs[seq_id].status = SEQ_FINISHED;
+                log_printf("[Seq %d] FINISHED.\n", seq_id);
             }
         }
         
         // Visualize Memory State
-        if (active_count > 0 || global_step < 10) { // Keep visualizing for a bit
+        if (batch_count > 0 || global_step < 10) { 
              visualize_kv_cache_usage(seqs, BATCH_SIZE, &g_kv_manager, config.max_seq_len, g_visualize_paged);
         }
         global_step++;
         
-        // Safety break
         if (global_step > 500) break;
     }
     
@@ -502,7 +529,6 @@ int main(int argc, char** argv) {
     log_printf("\n=== Final Generated Sequences ===\n");
     for(int i=0; i<BATCH_SIZE; i++) {
         log_printf("[Seq %d]: ", i);
-        // Be careful with seq_len vs pos
         int max_print = seqs[i].pos; 
         if (max_print > seqs[i].seq_len) max_print = seqs[i].seq_len;
         
@@ -522,9 +548,16 @@ int main(int argc, char** argv) {
     free(history_log);
     free(long_prompt);
     free_tokenizer(&tokenizer);
+    
+    free(batch_tokens);
+    free(batch_pos);
+    free(batch_seq_ids);
+    free(batch_output_indices);
+    free(batch_block_tables);
+    free_run_state(&batch_state);
+    
     for(int i=0; i<BATCH_SIZE; i++) {
-        free_run_state(seqs[i].state);
-        free(seqs[i].state);
+        if (seqs[i].state) free(seqs[i].state); // If we alloced it
         free(seqs[i].prompt_tokens);
         free(seqs[i].output_history);
         if (g_paged_mode) {

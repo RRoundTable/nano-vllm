@@ -138,6 +138,42 @@ void update_kv_cache_paged(KVCacheManager* mgr, BlockTable* block_table, float* 
     }
 }
 
+// Batched version for Continuous Batching
+void update_kv_cache_paged_batch(KVCacheManager* mgr, BlockTable** block_tables, int* seq_ids, float* k, float* v, 
+                                 int layer, int* pos_arr, int n_kv_heads, int head_dim, int num_tokens) {
+    
+    int head_block_size = n_kv_heads * head_dim;
+
+    for (int t = 0; t < num_tokens; t++) {
+        // Fetch sequence specific info
+        int seq_id = seq_ids[t];
+        BlockTable* block_table = block_tables[seq_id];
+        int current_pos = pos_arr[t];
+        
+        // Find physical location
+        int block_size = mgr->block_size;
+        int logical_block_idx = current_pos / block_size;
+        int block_offset = current_pos % block_size;
+        
+        // Get physical block index from table
+        if (logical_block_idx >= block_table->num_blocks) {
+            printf("Error: Block table too small! logical_idx=%d, num_blocks=%d\n", logical_block_idx, block_table->num_blocks);
+            return;
+        }
+        int physical_block_idx = block_table->block_indices[logical_block_idx];
+        
+        // Calculate physical offset
+        long offset = get_physical_offset(mgr, layer, physical_block_idx, block_offset, n_kv_heads, head_dim);
+        
+        // Write to pool
+        float* k_src = k + t * head_block_size;
+        float* v_src = v + t * head_block_size;
+
+        memcpy(mgr->pool_k + offset, k_src, head_block_size * sizeof(float));
+        memcpy(mgr->pool_v + offset, v_src, head_block_size * sizeof(float));
+    }
+}
+
 void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* block_table, float* att,
                      int layer, int pos, int max_seq_len, int n_heads, int n_kv_heads, int head_dim, int num_tokens) {
     
@@ -161,6 +197,97 @@ void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* bloc
             // 1. Score: Q @ K.T (Iterate over all previous tokens)
             for (int t = 0; t <= current_global_pos; t++) {
                 // Resolve Physical Address for Token t
+                int logical_block = t / block_size;
+                int block_offset = t % block_size;
+                int physical_block = block_table->block_indices[logical_block];
+                
+                long offset = get_physical_offset(mgr, layer, physical_block, block_offset, n_kv_heads, head_dim);
+                
+                float* k_head = mgr->pool_k + offset + kv_h * head_dim;
+                
+                float score = 0.0f;
+                for (int i = 0; i < head_dim; i++) {
+                    score += q_head[i] * k_head[i];
+                }
+                score *= scale;
+                att_head[t] = score;
+            }
+            
+            // 2. Softmax
+            float max_val = -INFINITY;
+            for (int t = 0; t <= current_global_pos; t++) {
+                if (att_head[t] > max_val) max_val = att_head[t];
+            }
+            
+            float sum = 0.0f;
+            for (int t = 0; t <= current_global_pos; t++) {
+                float val = expf(att_head[t] - max_val);
+                att_head[t] = val;
+                sum += val;
+            }
+            
+            for (int t = 0; t <= current_global_pos; t++) {
+                att_head[t] /= sum;
+            }
+            
+            // 3. Weighted Sum: Att @ V
+            float* out_head = out_token + h * head_dim;
+            for(int i=0; i<head_dim; i++) out_head[i] = 0.0f;
+            
+            for (int t = 0; t <= current_global_pos; t++) {
+                float prob = att_head[t];
+                
+                int logical_block = t / block_size;
+                int block_offset = t % block_size;
+                int physical_block = block_table->block_indices[logical_block];
+                
+                long offset = get_physical_offset(mgr, layer, physical_block, block_offset, n_kv_heads, head_dim);
+                float* v_head = mgr->pool_v + offset + kv_h * head_dim;
+                
+                for (int i = 0; i < head_dim; i++) {
+                    out_head[i] += prob * v_head[i];
+                }
+            }
+        }
+    }
+}
+
+// Batched version for Continuous Batching
+void paged_attention_batch(float* out, float* q, KVCacheManager* mgr, BlockTable** block_tables, int* seq_ids, float* att,
+                     int layer, int* pos_arr, int max_seq_len, int n_heads, int n_kv_heads, int head_dim, int num_tokens) {
+    
+    float scale = 1.0f / sqrtf(head_dim);
+    int block_size = mgr->block_size; 
+    int q_dim = n_heads * head_dim;
+
+    // Loop over all tokens in the batch (ragged)
+    for (int curr_t = 0; curr_t < num_tokens; curr_t++) {
+        // Fetch sequence specific info
+        int seq_id = seq_ids[curr_t];
+        BlockTable* block_table = block_tables[seq_id];
+        int current_global_pos = pos_arr[curr_t];
+        
+        float* q_token = q + curr_t * q_dim;
+        float* out_token = out + curr_t * q_dim;
+
+        #if defined(_OPENMP)
+        #pragma omp parallel for
+        #endif
+        for (int h = 0; h < n_heads; h++) {
+            int kv_h = h / (n_heads / n_kv_heads); // GQA
+            float* q_head = q_token + h * head_dim;
+            
+            // Use a specific slice of the att buffer? 
+            // We assume att is large enough: [n_heads, max_seq_len] -> NO.
+            // Wait, att buffer in `s->att` is `n_heads * max_seq_len`.
+            // In the original code, `s->att` is reused per token because the loop `curr_t` was outer and sequential.
+            // If we parallelize `curr_t` (e.g. GPU), we need `n_heads * max_seq_len * num_tokens`.
+            // But here `curr_t` is a serial loop in CPU.
+            // So we can REUSE `att` buffer for each token.
+            float* att_head = att + h * max_seq_len;
+            
+            // 1. Score: Q @ K.T
+            for (int t = 0; t <= current_global_pos; t++) {
                 int logical_block = t / block_size;
                 int block_offset = t % block_size;
                 int physical_block = block_table->block_indices[logical_block];

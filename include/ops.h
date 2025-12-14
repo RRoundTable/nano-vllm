@@ -26,6 +26,9 @@ void matmul(float* out, float* in, float* weight, int num_tokens, int in_dim, in
 // pos: start position for the batch
 void apply_rope(float* q, float* k, int pos, float theta, int head_dim, int num_tokens, int n_heads, int n_kv_heads);
 
+// RoPE (Ragged Batched)
+void apply_rope_batch(float* q, float* k, int* pos_arr, float theta, int head_dim, int num_tokens, int n_heads, int n_kv_heads);
+
 // Activation (Batched)
 // hidden_dim: size of one vector
 void swiglu(float* hb, float* h_gate, float* h_up, int hidden_dim, int num_tokens);
@@ -55,8 +58,16 @@ long get_physical_offset(KVCacheManager* mgr, int layer, int block_idx, int bloc
 void update_kv_cache_paged(KVCacheManager* mgr, BlockTable* block_table, float* k, float* v, 
                            int layer, int pos, int n_kv_heads, int head_dim, int num_tokens);
 
+// Batched version for Continuous Batching
+void update_kv_cache_paged_batch(KVCacheManager* mgr, BlockTable** block_tables, int* seq_ids, float* k, float* v, 
+                                 int layer, int* pos_arr, int n_kv_heads, int head_dim, int num_tokens);
+
 void paged_attention(float* out, float* q, KVCacheManager* mgr, BlockTable* block_table, float* att,
                      int layer, int pos, int max_seq_len, int n_heads, int n_kv_heads, int head_dim, int num_tokens);
+
+// Batched version for Continuous Batching
+void paged_attention_batch(float* out, float* q, KVCacheManager* mgr, BlockTable** block_tables, int* seq_ids, float* att,
+                     int layer, int* pos_arr, int max_seq_len, int n_heads, int n_kv_heads, int head_dim, int num_tokens);
 
 // Visualization
 void visualize_attention(float* att, int n_heads, int pos, int max_seq_len);

@@ -106,6 +106,42 @@ void apply_rope(float* q, float* k, int pos, float theta, int head_dim, int num_
     }
 }
 
+void apply_rope_batch(float* q, float* k, int* pos_arr, float theta, int head_dim, int num_tokens, int n_heads, int n_kv_heads) {
+    int dim_q = n_heads * head_dim;
+    int dim_k = n_kv_heads * head_dim;
+
+    for (int t = 0; t < num_tokens; t++) {
+        int current_pos = pos_arr[t];
+        float* q_ptr = q + t * dim_q;
+        float* k_ptr = k + t * dim_k;
+
+        for (int i = 0; i < head_dim; i+=2) {
+            float freq = 1.0f / powf(theta, i / (float)head_dim);
+            float val = current_pos * freq;
+            float fcr = cosf(val);
+            float fci = sinf(val);
+            
+            // Apply to Query
+            for (int h = 0; h < n_heads; h++) {
+                float* vec = q_ptr + h * head_dim;
+                float v0 = vec[i];
+                float v1 = vec[i+1];
+                vec[i]   = v0 * fcr - v1 * fci;
+                vec[i+1] = v0 * fci + v1 * fcr;
+            }
+            
+            // Apply to Key
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* vec = k_ptr + h * head_dim;
+                float v0 = vec[i];
+                float v1 = vec[i+1];
+                vec[i]   = v0 * fcr - v1 * fci;
+                vec[i+1] = v0 * fci + v1 * fcr;
+            }
+        }
+    }
+}
+
 // ===========================================================================
 // Activation / Element-wise
 // ===========================================================================
