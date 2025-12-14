@@ -241,18 +241,13 @@ int main(int argc, char** argv) {
     // Define Batches: Long vs Short Race
     int BATCH_SIZE = 2;
     
-    // Construct Long Prompt (programmatically)
-    // 50 reps of "Hello world " should be around 100 tokens.
-    // If we use stories15M vocab, "Hello" " world" are likely tokens.
-    char* long_prompt = (char*)malloc(2048);
-    long_prompt[0] = '\0';
-    for(int i=0; i<50; i++) {
-        strcat(long_prompt, "Once upon a time "); 
-    }
+    // Construct Long Prompt (Realistic Story)
+    char* long_prompt = (char*)malloc(4096);
+    strcpy(long_prompt, "Once upon a time, there was a little bird named Tweety. Tweety lived in a big tree with his family. One day, the sun was shining bright and the sky was blue. Tweety wanted to fly high in the sky. He flapped his little wings and jumped from the branch. Down, down, down he went! He was scared but he kept flapping. Suddenly, he felt the wind under his wings. He was flying! He flew over the green grass and the blue river. He saw a big cow eating grass. \"Hello Cow!\" chirped Tweety. The cow looked up and said \"Moo!\". Tweety was so happy. He flew higher and higher until he saw a white cloud. He wanted to touch it. But then, he saw something else. It was a big, scary hawk! The hawk was looking at Tweety with hungry eyes. Tweety was afraid. He flew as fast as he could back to his tree. He hid under a big leaf. The hawk flew away. Tweety was safe. He promised his mom he would be careful. His mom gave him a big hug and a worm. Tweety was happy again. The next day, Tweety ");
     
     char* prompts[2] = {
         long_prompt,      // Seq 0: Long
-        "Who are you?"    // Seq 1: Short
+        "One day, a cat"  // Seq 1: Short
     };
     
     int arrival_steps[2] = { 0, 5 }; // Seq 1 arrives late
