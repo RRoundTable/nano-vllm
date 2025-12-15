@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
     printf("Initializing...\n");
     load_model(&weights, &config, model_path);
     
+    // Override max_seq_len to support long prompts (demo specific)
+    if (config.max_seq_len < 1024) {
+        printf("Override: Increasing max_seq_len from %d to 1024 to support long prompts.\n", config.max_seq_len);
+        config.max_seq_len = 1024;
+    }
+    
     // Batch State (Global Workspace)
     RunState batch_state;
     malloc_run_state(&batch_state, &config); // Allocates max_seq_len capacity
@@ -395,8 +401,11 @@ int main(int argc, char** argv) {
             // log_printf("[Seq %d] Gen: %s\n", seq_id, text);
             
             // Store
-            if (seqs[seq_id].pos < seqs[seq_id].seq_len) {
-                 seqs[seq_id].output_history[seqs[seq_id].pos] = next_token;
+            // Only update history if we are generating NEW tokens (after prompt)
+            if (seqs[seq_id].pos >= seqs[seq_id].num_prompt_tokens) {
+                if (seqs[seq_id].pos < seqs[seq_id].seq_len) {
+                     seqs[seq_id].output_history[seqs[seq_id].pos] = next_token;
+                }
             }
             
             // Update current token for next step

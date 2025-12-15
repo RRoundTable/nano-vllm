@@ -10,7 +10,9 @@ LDFLAGS_CPU = -lm
 # Conditional OpenMP for CPU
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-    # Mac Default Clang doesn't support -fopenmp easily
+    # Use Homebrew libomp
+    CFLAGS += -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
+    LDFLAGS_CPU += -L/opt/homebrew/opt/libomp/lib -lomp
 else
     CFLAGS += -fopenmp
     LDFLAGS_CPU += -fopenmp
