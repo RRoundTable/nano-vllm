@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
         for(int j=0; j<seqs[i].num_prompt_tokens; j++) {
             seqs[i].output_history[j] = seqs[i].prompt_tokens[j];
         }
-        seqs[i].seq_len = seqs[i].num_prompt_tokens + steps;
+        seqs[i].seq_len = seqs[i].num_prompt_tokens + steps; # input length + steps to generate
     }
 
     log_printf("Starting Continuous Batching (Ragged) Demo (Chunk Size: %d)\n", chunk_size);
@@ -420,20 +420,6 @@ int main(int argc, char** argv) {
                 batch_seq_ids[batch_count + t] = i;
             }
             
-            // Mark Output Request
-            // We want logits for the LAST token of this chunk
-            // The index in the batch is (batch_count + n_tokens - 1)
-            // BUT wait: sample() needs logits for this seq.
-            // We can map output i -> batch index.
-            // Let's store: "For this sequence i, the logits are at batch index X"
-            // Actually, `transformer_batch` computes logits for indices in `output_indices`.
-            // So we add (batch_count + n_tokens - 1) to `batch_output_indices`.
-            // AND we need to know which sequence that belongs to.
-            // Let's rely on `i` loop order?
-            // Better: `batch_output_seq_ids[output_count]` ? 
-            // Or just know that `batch_output_indices[k]` corresponds to `output_seq_ids[k]`.
-            // Let's keep a local array `active_seq_ids` matching output_indices.
-            
             batch_output_indices[output_count] = batch_count + n_tokens - 1;
             // batch_output_seq_ids[output_count] = i; // implicit if we iterate active seqs again? No.
             // Let's use `batch_seq_ids` of the output token to identify the sequence.
@@ -441,8 +427,6 @@ int main(int argc, char** argv) {
             output_count++;
             batch_count += n_tokens;
             
-            // Advance Seq Position Speculatively? 
-            // Yes, assuming success.
             seqs[i].pos += n_tokens;
             
             if (is_prefill) {
