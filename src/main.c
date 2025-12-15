@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
         for(int j=0; j<seqs[i].num_prompt_tokens; j++) {
             seqs[i].output_history[j] = seqs[i].prompt_tokens[j];
         }
-        seqs[i].seq_len = seqs[i].num_prompt_tokens + steps; # input length + steps to generate
+        seqs[i].seq_len = seqs[i].num_prompt_tokens + steps; // input length + steps to generate
     }
 
     log_printf("Starting Continuous Batching (Ragged) Demo (Chunk Size: %d)\n", chunk_size);
