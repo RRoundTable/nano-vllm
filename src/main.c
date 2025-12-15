@@ -8,12 +8,10 @@
 #include "ops.h"
 #include "backend.h"
 #include "log.h"
+#include "model.h"
 #include <limits.h>
 
 // Forward declarations
-void load_model(Weights* w, Config* p, const char* checkpoint_path);
-void malloc_run_state(RunState* s, Config* p);
-void free_run_state(RunState* s);
 void visualize_final_timeline(char* history, int num_seqs, int total_steps, int max_steps_capacity);
 
 typedef struct {
@@ -55,89 +53,6 @@ int g_paged_mode = 0; // Actual Logic Mode
 
 // PagedAttention Globals
 KVCacheManager g_kv_manager;
-
-// Refactored Transformer to support Batched Processing
-void transformer(int* tokens, int num_tokens, int pos, Config* p, RunState* s, Weights* w, BlockTable* bt) {
-    // Deprecated for continuous batching, but kept for reference or single-seq fallback
-    // ... (Original logic omitted for brevity if not used) ...
-    printf("Error: Old transformer called in Continuous Batching mode.\n");
-    exit(1);
-}
-
-// Batched Transformer
-void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids, 
-                       int* output_indices, int num_outputs,
-                       Config* p, RunState* s, Weights* w, BlockTable** block_tables) {
-    
-    // 1. Embedding
-    for (int t = 0; t < num_tokens; t++) {
-        float* content_row = w->token_embedding_table + tokens[t] * p->dim;
-        check_status(device_memcpy(s->x + t * p->dim, content_row, p->dim * sizeof(float), DEVICE_TO_DEVICE));
-    }
-    
-    // 2. Layers
-    for(int i = 0; i < p->n_layers; i++) {
-        LayerWeights* l = &w->layers[i];
-        
-        rms_norm(s->xb, s->x, l->rms_att_weight, p->dim, num_tokens, 1e-5f);
-        
-        matmul(s->q, s->xb, l->wq, num_tokens, p->dim, p->n_heads * p->head_dim);
-        matmul(s->k, s->xb, l->wk, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
-        matmul(s->v, s->xb, l->wv, num_tokens, p->dim, p->n_kv_heads * p->head_dim);
-        
-        // Batched RoPE with pos_arr
-        apply_rope_batch(s->q, s->k, pos_arr, p->rope_theta, p->head_dim, num_tokens, p->n_heads, p->n_kv_heads);
-        
-        // KV Update Paged Batch
-        if (g_paged_mode) {
-             update_kv_cache_paged_batch(&g_kv_manager, block_tables, seq_ids, s->k, s->v, 
-                                  i, pos_arr, p->n_kv_heads, p->head_dim, num_tokens);
-        } else {
-             printf("Error: Continuous batching requires paged mode.\n");
-             exit(1);
-        }
-        
-        // Attention Batch
-        if (g_paged_mode) {
-            paged_attention_batch(s->xb2, s->q, &g_kv_manager, block_tables, seq_ids, s->att,
-                            i, pos_arr, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
-        }
-        
-        matmul(s->xb, s->xb2, l->wo, num_tokens, p->n_heads * p->head_dim, p->dim);
-        accum(s->x, s->xb, num_tokens * p->dim);
-        
-        rms_norm(s->xb, s->x, l->rms_ffn_weight, p->dim, num_tokens, 1e-5f);
-        matmul(s->hb, s->xb, l->w_gate, num_tokens, p->dim, p->hidden_dim);
-        matmul(s->hb2, s->xb, l->w_up, num_tokens, p->dim, p->hidden_dim);
-        swiglu(s->hb, s->hb, s->hb2, p->hidden_dim, num_tokens);
-        matmul(s->xb, s->hb, l->w_down, num_tokens, p->hidden_dim, p->dim);
-        accum(s->x, s->xb, num_tokens * p->dim);
-    }
-    
-    rms_norm(s->x, s->x, w->rms_final_weight, p->dim, num_tokens, 1e-5f);
-
-    // Compute Logits ONLY for output indices
-    // We reuse s->logits buffer. It is size [max_batch_size * vocab_size].
-    // We map output index k (0..num_outputs-1) to the location in s->logits.
-    // The source embedding is at s->x + output_indices[k] * dim.
-    
-    // We can do a batched matmul if we gather the embeddings?
-    // Or just loop. Since num_outputs is usually small (BATCH_SIZE), loop is fine.
-    // OR we can use the fact that `matmul` supports batching.
-    // If output_indices are contiguous at the end (often true for decode), we could optimize.
-    // But for general ragged batch, they might be scattered.
-    // Let's gather embeddings into s->xb (reuse buffer) or s->xb2?
-    // s->xb is [max_batch * dim]. Safe to use for first num_outputs.
-    
-    for(int k=0; k<num_outputs; k++) {
-        int token_idx = output_indices[k];
-        check_status(device_memcpy(s->xb + k * p->dim, s->x + token_idx * p->dim, p->dim * sizeof(float), DEVICE_TO_DEVICE));
-    }
-    
-    // Matmul: [num_outputs, dim] @ [vocab, dim]^T -> [num_outputs, vocab]
-    // s->logits will store the result.
-    matmul(s->logits, s->xb, w->lm_head, num_outputs, p->dim, p->vocab_size);
-}
 
 void print_usage(char *prog_name) {
     printf("Usage: %s <model_path> [options]\n", prog_name);
