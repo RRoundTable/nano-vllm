@@ -276,14 +276,6 @@ void paged_attention_batch(float* out, float* q, KVCacheManager* mgr, BlockTable
         for (int h = 0; h < n_heads; h++) {
             int kv_h = h / (n_heads / n_kv_heads); // GQA
             float* q_head = q_token + h * head_dim;
-            
-            // Use a specific slice of the att buffer? 
-            // We assume att is large enough: [n_heads, max_seq_len] -> NO.
-            // Wait, att buffer in `s->att` is `n_heads * max_seq_len`.
-            // In the original code, `s->att` is reused per token because the loop `curr_t` was outer and sequential.
-            // If we parallelize `curr_t` (e.g. GPU), we need `n_heads * max_seq_len * num_tokens`.
-            // But here `curr_t` is a serial loop in CPU.
-            // So we can REUSE `att` buffer for each token.
             float* att_head = att + h * max_seq_len;
             
             // 1. Score: Q @ K.T
