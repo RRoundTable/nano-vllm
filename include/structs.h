@@ -80,9 +80,16 @@ typedef struct {
     int num_blocks;     // Current number of blocks used
 } BlockTable;
 
+typedef enum {
+    SEQ_WAITING,
+    SEQ_PREFILLING,
+    SEQ_DECODING,
+    SEQ_FINISHED
+} SeqStatus;
+
 typedef struct {
     int id;
-    int active;       // 1 if generating, 0 if finished
+    int active;       // 1 if running (prefilling or decoding), 0 if waiting or finished
     int pos;          // Current position (tokens generated so far)
     int seq_len;      // Total tokens to generate (prompt + steps)
     int current_token;// Last generated token
@@ -91,6 +98,11 @@ typedef struct {
     int* output_history; // Store full token history
     RunState* state;  // Dedicated activation memory for this seq
     BlockTable table; // Dedicated block table for this seq
+    
+    // Scheduler Fields
+    int arrival_step;
+    SeqStatus status;
+    int first_token_latency; // Steps waited before first generation
 } Sequence;
 
 typedef struct {
