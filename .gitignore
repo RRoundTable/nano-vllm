@@ -81,4 +81,4 @@ data/*
 !data/.gitkeep
 *.bin
 
-nano_vllm_cpu
+nano_vllm

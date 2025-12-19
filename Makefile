@@ -1,59 +1,46 @@
-TARGET_CPU = nano_vllm_cpu
-TARGET_GPU = nano_vllm_gpu
+TARGET = nano_vllm
 CC = gcc
-NVCC = nvcc
 
-# Flags for Mac (CPU)
+# Flags for CPU
 CFLAGS = -O3 -Wall -Iinclude
-LDFLAGS_CPU = -lm
+LDFLAGS = -lm
 
 # Conditional OpenMP for CPU
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     # Use Homebrew libomp
-    CFLAGS += -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include
-    LDFLAGS_CPU += -L/opt/homebrew/opt/libomp/lib -lomp
+    # Check if brew exists and find prefix, otherwise fallback or assume standard paths
+    BREW_PREFIX := $(shell command -v brew >/dev/null 2>&1 && brew --prefix)
+    ifneq ($(BREW_PREFIX),)
+        CFLAGS += -Xpreprocessor -fopenmp -I$(BREW_PREFIX)/opt/libomp/include
+        LDFLAGS += -L$(BREW_PREFIX)/opt/libomp/lib -lomp
+    else
+        # Fallback for standard Mac without brew or if libomp is elsewhere
+        # User might need to adjust this if using Apple Clang without OpenMP
+    endif
 else
     CFLAGS += -fopenmp
-    LDFLAGS_CPU += -fopenmp
+    LDFLAGS += -fopenmp
 endif
 
-# Flags for CUDA
-NVCC_FLAGS = -O3 -arch=sm_80 -Iinclude -DNANO_CUDA
-
 # Sources
-SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c
-SRCS_CU = kernels/gpu/layers.cu kernels/gpu/attention.cu
-SRCS_CPU_KERNELS = kernels/cpu/layers.c kernels/cpu/attention.c
-SRCS_VISUALIZER = src/visualizer.c
+SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c src/visualizer.c
+SRCS_KERNELS = src/kernels/layers.c src/kernels/attention.c
 
 # Objects
 OBJS_C = $(SRCS_C:.c=.o)
-OBJS_CPU_KERNELS = $(SRCS_CPU_KERNELS:.c=.o)
-OBJS_VISUALIZER = $(SRCS_VISUALIZER:.c=.o)
+OBJS_KERNELS = $(SRCS_KERNELS:.c=.o)
 
-all: $(TARGET_CPU)
+all: $(TARGET)
 
-# CPU Build
-.PHONY: cpu
-cpu:
-	$(MAKE) clean
-	$(MAKE) $(TARGET_CPU)
-
-$(TARGET_CPU): $(OBJS_C) $(OBJS_CPU_KERNELS) $(OBJS_VISUALIZER)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS_CPU)
+$(TARGET): $(OBJS_C) $(OBJS_KERNELS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
-
-# GPU Build (requires nvcc)
-gpu: $(TARGET_GPU)
-
-$(TARGET_GPU): $(SRCS_C) $(SRCS_CU) $(OBJS_VISUALIZER)
-	$(NVCC) $(NVCC_FLAGS) -o $@ $^
 
 setup:
 	./setup_models.sh
 
 clean:
-	rm -f $(TARGET_CPU) $(TARGET_GPU) src/*.o kernels/cpu/*.o *.log
+	rm -f $(TARGET) src/*.o src/kernels/*.o *.log

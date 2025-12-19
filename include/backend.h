@@ -7,72 +7,37 @@
 
 // ==========================================
 // Backend Abstraction Layer
-// Maps device_X functions to either CUDA or Standard C
+// CPU-Only Implementation
 // ==========================================
 
-#if defined(__CUDACC__) || defined(NANO_CUDA)
-    // --------------------------------------
-    // GPU Backend (CUDA)
-    // --------------------------------------
-    #include <cuda_runtime.h>
+// Mock enums for memcpy direction (ignored in CPU memcpy)
+typedef int DeviceMemcpyKind;
+#define DEVICE_TO_HOST 0
+#define DEVICE_TO_DEVICE 1
+#define HOST_TO_DEVICE 2
 
-    #define DEVICE_TO_HOST cudaMemcpyDeviceToHost
-    #define DEVICE_TO_DEVICE cudaMemcpyDeviceToDevice
-    #define HOST_TO_DEVICE cudaMemcpyHostToDevice
+// Mock status check (always success)
+#define check_status(stmt) stmt
 
-    // Macro for checking CUDA errors
-    #define check_status(call)                                                     \
-    do {                                                                           \
-        cudaError_t err = call;                                                    \
-        if (err != cudaSuccess) {                                                  \
-            fprintf(stderr, "CUDA Error: %s:%d: %s\n", __FILE__, __LINE__,         \
-                    cudaGetErrorString(err));                                      \
-            exit(1);                                                               \
-        }                                                                          \
-    } while (0)
+// Wrappers
+// cudaMalloc expects (void**, size), malloc returns void*
+static inline int device_malloc(void** ptr, size_t size) {
+    *ptr = malloc(size);
+    if (*ptr == NULL) return -1;
+    return 0;
+}
 
-    // Wrappers
-    #define device_malloc(ptr, size) cudaMalloc(ptr, size)
-    #define device_free(ptr) cudaFree(ptr)
-    #define device_memcpy(dst, src, size, kind) cudaMemcpy(dst, src, size, kind)
-    #define device_sync() cudaDeviceSynchronize()
+static inline void device_free(void* ptr) {
+    free(ptr);
+}
 
-#else
-    // --------------------------------------
-    // CPU Backend (Standard C)
-    // --------------------------------------
-    
-    // Mock enums for memcpy direction (ignored in CPU memcpy)
-    typedef int DeviceMemcpyKind;
-    #define DEVICE_TO_HOST 0
-    #define DEVICE_TO_DEVICE 1
-    #define HOST_TO_DEVICE 2
+static inline int device_memcpy(void* dst, const void* src, size_t size, DeviceMemcpyKind kind) {
+    memcpy(dst, src, size);
+    return 0;
+}
 
-    // Mock status check (always success)
-    #define check_status(stmt) stmt
-
-    // Wrappers
-    // cudaMalloc expects (void**, size), malloc returns void*
-    static inline int device_malloc(void** ptr, size_t size) {
-        *ptr = malloc(size);
-        if (*ptr == NULL) return -1;
-        return 0;
-    }
-
-    static inline void device_free(void* ptr) {
-        free(ptr);
-    }
-
-    static inline int device_memcpy(void* dst, const void* src, size_t size, DeviceMemcpyKind kind) {
-        memcpy(dst, src, size);
-        return 0;
-    }
-
-    static inline void device_sync() {
-        // No-op for CPU
-    }
-
-#endif // __CUDACC__
+static inline void device_sync() {
+    // No-op for CPU
+}
 
 #endif // BACKEND_H
-

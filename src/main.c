@@ -377,19 +377,9 @@ int main(int argc, char** argv) {
             float* logits = batch_state.logits + k * config.vocab_size;
             
             // Sample
-            float* host_logits;
-            #if defined(__CUDACC__) || defined(NANO_CUDA)
-                host_logits = (float*)malloc(config.vocab_size * sizeof(float));
-                check_status(device_memcpy(host_logits, logits, config.vocab_size * sizeof(float), DEVICE_TO_HOST));
-            #else
-                host_logits = logits;
-            #endif
+            float* host_logits = logits;
             
             int next_token = sample(&sampler, host_logits);
-            
-            #if defined(__CUDACC__) || defined(NANO_CUDA)
-                free(host_logits);
-            #endif
             
             // Process Result
             // Check if we just finished a prompt
