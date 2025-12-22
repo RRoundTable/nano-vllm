@@ -31,6 +31,10 @@ SRCS_KERNELS = src/kernels/layers.c src/kernels/attention.c
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_KERNELS = $(SRCS_KERNELS:.c=.o)
 
+# Tests
+TEST_SRCS = tests/test_paged_attention.c tests/test_chunked_prefill.c tests/test_continuous_batching.c
+TEST_BINS = $(TEST_SRCS:.c=)
+
 all: $(TARGET)
 
 $(TARGET): $(OBJS_C) $(OBJS_KERNELS)
@@ -38,6 +42,17 @@ $(TARGET): $(OBJS_C) $(OBJS_KERNELS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Test Rules
+tests/%: tests/%.c $(OBJS_C) $(OBJS_KERNELS)
+	# Filter out main.o from dependencies to avoid multiple main functions
+	$(CC) $(CFLAGS) -o $@ $< $(filter-out src/main.o, $(OBJS_C)) $(OBJS_KERNELS) $(LDFLAGS)
+
+test_all: $(TEST_BINS)
+	@echo "Running Tests..."
+	@./tests/test_paged_attention
+	@./tests/test_chunked_prefill
+	@./tests/test_continuous_batching
 
 setup:
 	./setup_models.sh

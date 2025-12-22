@@ -82,3 +82,6 @@ data/*
 *.bin
 
 nano_vllm
+tests/test_paged_attention
+tests/test_chunked_prefill
+tests/test_continuous_batching
