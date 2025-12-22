@@ -41,19 +41,55 @@ while (!all_finished) {
 ```
 
 ### 2.3. Data Structure: The Ragged Batch
-Since sequences are not aligned, we cannot use a simple `[Batch, Seq_Len]` tensor. Instead, we use flat arrays (Ragged Tensor representation):
+Since sequences are not aligned, we cannot use a simple `[Batch, Seq_Len]` tensor. Instead, we use flat arrays (Ragged Tensor representation).
+
+To illustrate how **Ragged Batch**, **Chunked Prefill**, and **Causal Masking** work together, consider this scenario:
+
+**Scenario:**
+- **Seq A** (ID 0): A long prompt with 6 tokens `[A0, A1, A2, A3, A4, A5]`. **Chunk Size = 3**.
+- **Seq B** (ID 1): A decoding sequence (chatbot) currently at position 50.
+
+The scheduler breaks Seq A into chunks over multiple steps.
+
+#### Step 1: Processing First Chunk of A + Seq B
+We construct the batch by taking the first 3 tokens of A and the next input for B.
 
 ```
-Example Batch:
-Seq A (Prefill, 3 tokens)
-Seq B (Decode, 1 token)
-
-batch_tokens: [ A1, A2, A3, B1 ]
-batch_pos:    [ 10, 11, 12, 50 ]
-batch_seq_ids:[ 0,  0,  0,  1  ]
+batch_tokens:  [ A0, A1, A2, B_in ]
+batch_pos:     [ 0,  1,  2,  50   ]
+batch_seq_ids: [ 0,  0,  0,  1    ]
 ```
 
-The Attention Kernel (`kernels/cpu/attention.c`) uses `batch_seq_ids` to ensure Token A only attends to Seq A's KV Cache (via Block Table), and Token B attends to Seq B.
+**Conceptual Attention Mask:**
+Inside the batch, prefill tokens attend to each other causally (Triangle). Decode tokens attend to their full history in KV Cache.
+
+| Query \ Key | A0 | A1 | A2 | B_in | KV Cache (Past) |
+| :--- | :-: | :-: | :-: | :-: | :--- |
+| **A0** | 1 | 0 | 0 | 0 | (Empty) |
+| **A1** | 1 | 1 | 0 | 0 | (Empty) |
+| **A2** | 1 | 1 | 1 | 0 | (Empty) |
+| **B_in** | 0 | 0 | 0 | 1 | Attends to B0...B49 |
+
+#### Step 2: Processing Second Chunk of A + Seq B (Next Tick)
+Now `A0-A2` are stored in the KV Cache. We process the rest of A (`A3-A5`) and the next token for B.
+
+```
+batch_tokens:  [ A3, A4, A5, B_new ]
+batch_pos:     [ 3,  4,  5,  51    ]
+batch_seq_ids: [ 0,  0,  0,  1     ]
+```
+
+**Conceptual Attention Mask:**
+The new chunk `A3-A5` attends to itself causally AND fully attends to the previous chunk `A0-A2` (now in KV Cache).
+
+| Query \ Key | A3 | A4 | A5 | B_new | KV Cache (Past) |
+| :--- | :-: | :-: | :-: | :-: | :--- |
+| **A3** | 1 | 0 | 0 | 0 | Attends to A0...A2 |
+| **A4** | 1 | 1 | 0 | 0 | Attends to A0...A2 |
+| **A5** | 1 | 1 | 1 | 0 | Attends to A0...A2 |
+| **B_new** | 0 | 0 | 0 | 1 | Attends to B0...B50 |
+
+The Attention Kernel (`src/kernels/attention.c`) uses `batch_seq_ids` to map each token to its correct KV Cache blocks, handling these dependencies automatically.
 
 ## 3. Chunked Prefill
 
