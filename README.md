@@ -90,8 +90,8 @@ nano-vllm/
 
 - [x] **Phase 1**: Naive CPU Inference & Visualization
 - [x] **Phase 2**: PagedAttention (KV Cache Paging)
-- [ ] **Phase 3**: Continuous Batching
-- [ ] **Phase 4**: Chunked Prefill
+- [x] **Phase 3**: Continuous Batching
+- [x] **Phase 4**: Chunked Prefill
 
 ## License
 
