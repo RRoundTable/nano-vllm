@@ -8,7 +8,7 @@
 #include "ops.h"
 
 extern int g_paged_mode;
-extern KVCacheManager g_kv_manager;
+// extern KVCacheManager g_kv_manager;
 
 // FP16 to FP32 conversion
 // Reference: https://stackoverflow.com/questions/1659440/32-bit-to-16-bit-floating-point-conversion
@@ -346,7 +346,8 @@ void transformer(int* tokens, int num_tokens, int pos, Config* p, RunState* s, W
 // Batched Transformer
 void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids, 
                        int* output_indices, int num_outputs,
-                       Config* p, RunState* s, Weights* w, BlockTable** block_tables) {
+                       Config* p, RunState* s, Weights* w, BlockTable** block_tables,
+                       KVCacheManager* kv_manager) {
     
     // 1. Embedding
     for (int t = 0; t < num_tokens; t++) {
@@ -369,7 +370,7 @@ void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids,
         
         // KV Update Paged Batch
         if (g_paged_mode) {
-             update_kv_cache_paged_batch(&g_kv_manager, block_tables, seq_ids, s->k, s->v, 
+             update_kv_cache_paged_batch(kv_manager, block_tables, seq_ids, s->k, s->v, 
                                   i, pos_arr, p->n_kv_heads, p->head_dim, num_tokens);
         } else {
              printf("Error: Continuous batching requires paged mode.\n");
@@ -378,7 +379,7 @@ void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids,
         
         // Attention Batch
         if (g_paged_mode) {
-            paged_attention_batch(s->xb2, s->q, &g_kv_manager, block_tables, seq_ids, s->att,
+            paged_attention_batch(s->xb2, s->q, kv_manager, block_tables, seq_ids, s->att,
                             i, pos_arr, p->max_seq_len, p->n_heads, p->n_kv_heads, p->head_dim, num_tokens);
         }
         

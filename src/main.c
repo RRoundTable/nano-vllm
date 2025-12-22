@@ -9,6 +9,7 @@
 #include "backend.h"
 #include "log.h"
 #include "model.h"
+#include "scheduler.h"
 #include <limits.h>
 
 // Forward declarations
@@ -246,116 +247,39 @@ int main(int argc, char** argv) {
     for(int i=0; i<BATCH_SIZE * history_capacity; i++) history_log[i] = ' ';
     
     // Batch Buffers
-    int* batch_tokens = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
-    int* batch_pos = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
-    int* batch_seq_ids = (int*)malloc(MAX_BATCH_CAPACITY * sizeof(int));
-    int* batch_output_indices = (int*)malloc(BATCH_SIZE * sizeof(int)); // Max 1 output per seq per step
-    BlockTable** batch_block_tables = (BlockTable**)malloc(BATCH_SIZE * sizeof(BlockTable*));
-    
-    // Initialize BlockTable ptrs
-    for(int i=0; i<BATCH_SIZE; i++) batch_block_tables[i] = &seqs[i].table;
+    BatchData batch;
+    init_batch_data(&batch, MAX_BATCH_CAPACITY, BATCH_SIZE);
 
     // Main Batch Loop
     while (!all_finished) {
         all_finished = 1;
         
         // Reset Batch Counters
-        int batch_count = 0;
-        int output_count = 0;
+        batch_reset(&batch);
         
         log_printf("\n--- Step %d ---\n", global_step);
         
-        // 1. Scheduler Phase: Collect Tokens
+        // 1. Scheduler Phase
+        int active_sequences = scheduler_step(seqs, BATCH_SIZE, global_step, MAX_BATCH_CAPACITY, chunk_size, &g_kv_manager, &batch);
+        
+        // Update History Log
         for (int i = 0; i < BATCH_SIZE; i++) {
-             // Check Arrival
-            if (global_step < seqs[i].arrival_step) {
-                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'W';
-                all_finished = 0;
-                continue;
-            }
-            
-            // Activate
-            if (seqs[i].status == SEQ_WAITING) {
-                seqs[i].active = 1;
-                seqs[i].status = SEQ_PREFILLING;
-                log_printf(">>> [Scheduler] Seq %d ARRIVED!\n", i);
-            }
-            
-            if (seqs[i].status == SEQ_FINISHED) {
-                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'F';
-                continue;
-            }
-            
-            all_finished = 0; // At least one running
-            
-            // Decide how many tokens to add
-            int is_prefill = (seqs[i].pos < seqs[i].num_prompt_tokens - 1);
-            int n_tokens = 0;
-            int start_pos = seqs[i].pos;
-            int* token_ptr = NULL;
-            
-            if (is_prefill) {
-                seqs[i].status = SEQ_PREFILLING;
-                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'P';
-                
-                int end_pos = seqs[i].num_prompt_tokens;
-                int remaining = end_pos - start_pos;
-                n_tokens = (remaining > chunk_size) ? chunk_size : remaining;
-                token_ptr = seqs[i].prompt_tokens + start_pos;
-                
-            } else {
-                seqs[i].status = SEQ_DECODING;
-                if (global_step < history_capacity) history_log[i*history_capacity + global_step] = 'D';
-                
-                n_tokens = 1;
-                token_ptr = &seqs[i].current_token;
-            }
-            
-            // Check Capacity
-            if (batch_count + n_tokens > MAX_BATCH_CAPACITY) {
-                log_printf("WARNING: Batch capacity reached! Skipping Seq %d this step.\n", i);
-                continue; // Wait for next step
-            }
-            
-            // Alloc Blocks if needed (for Paged Attention)
-            // We check each token position
-            int block_size = g_kv_manager.block_size;
-            for (int t = 0; t < n_tokens; t++) {
-                int current_pos = start_pos + t;
-                if (current_pos % block_size == 0) {
-                    int new_block = alloc_block(&g_kv_manager);
-                    if (new_block == -1) {
-                        printf("Error: Out of KV Cache blocks!\n");
-                        exit(1);
-                    }
-                    int logical_idx = current_pos / block_size;
-                    seqs[i].table.block_indices[logical_idx] = new_block;
-                    seqs[i].table.num_blocks++;
-                }
-            }
-            
-            // Add to Batch
-            for (int t = 0; t < n_tokens; t++) {
-                batch_tokens[batch_count + t] = token_ptr[t];
-                batch_pos[batch_count + t] = start_pos + t;
-                batch_seq_ids[batch_count + t] = i;
-            }
-            
-            batch_output_indices[output_count] = batch_count + n_tokens - 1;
-            // batch_output_seq_ids[output_count] = i; // implicit if we iterate active seqs again? No.
-            // Let's use `batch_seq_ids` of the output token to identify the sequence.
-            
-            output_count++;
-            batch_count += n_tokens;
-            
-            seqs[i].pos += n_tokens;
-            
-            if (is_prefill) {
-                 seqs[i].current_token = token_ptr[n_tokens - 1]; // Last token of chunk
-            }
+             char state_char = ' ';
+             if (global_step < seqs[i].arrival_step) state_char = 'W';
+             else if (seqs[i].status == SEQ_PREFILLING) state_char = 'P';
+             else if (seqs[i].status == SEQ_DECODING) state_char = 'D';
+             else if (seqs[i].status == SEQ_FINISHED) state_char = 'F';
+             
+             if (global_step < history_capacity) history_log[i*history_capacity + global_step] = state_char;
+        }
+
+        if (!active_sequences) {
+            all_finished = 1;
+        } else {
+            all_finished = 0;
         }
         
-        if (batch_count == 0 && !all_finished) {
+        if (batch.batch_count == 0 && !all_finished) {
             // Everyone waiting?
             global_step++;
             continue;
@@ -364,14 +288,14 @@ int main(int argc, char** argv) {
         if (all_finished) break;
         
         // 2. Inference
-        transformer_batch(batch_tokens, batch_count, batch_pos, batch_seq_ids, 
-                          batch_output_indices, output_count,
-                          &config, &batch_state, &weights, batch_block_tables);
+        transformer_batch(batch.tokens, batch.batch_count, batch.pos, batch.seq_ids, 
+                          batch.output_indices, batch.output_count,
+                          &config, &batch_state, &weights, batch.block_tables, &g_kv_manager);
                           
         // 3. Sampling & Update
-        for (int k = 0; k < output_count; k++) {
-            int batch_idx = batch_output_indices[k];
-            int seq_id = batch_seq_ids[batch_idx];
+        for (int k = 0; k < batch.output_count; k++) {
+            int batch_idx = batch.output_indices[k];
+            int seq_id = batch.seq_ids[batch_idx];
             
             // Logits are in batch_state.logits[k * vocab_size]
             float* logits = batch_state.logits + k * config.vocab_size;
@@ -380,15 +304,6 @@ int main(int argc, char** argv) {
             float* host_logits = logits;
             
             int next_token = sample(&sampler, host_logits);
-            
-            // Process Result
-            // Check if we just finished a prompt
-            // int was_prefill = (seqs[seq_id].pos <= seqs[seq_id].num_prompt_tokens); 
-            // actually we already advanced `pos` by `n_tokens`.
-            
-            // Log
-            // const char* text = decode_token(&tokenizer, next_token);
-            // log_printf("[Seq %d] Gen: %s\n", seq_id, text);
             
             // Store
             // Only update history if we are generating NEW tokens (after prompt)
@@ -410,7 +325,7 @@ int main(int argc, char** argv) {
         }
         
         // Visualize Memory State
-        if (batch_count > 0 || global_step < 10) { 
+        if (batch.batch_count > 0 || global_step < 10) { 
              visualize_kv_cache_usage(seqs, BATCH_SIZE, &g_kv_manager, config.max_seq_len, g_visualize_paged);
         }
         global_step++;
@@ -447,11 +362,11 @@ int main(int argc, char** argv) {
     free(long_prompt);
     free_tokenizer(&tokenizer);
     
-    free(batch_tokens);
-    free(batch_pos);
-    free(batch_seq_ids);
-    free(batch_output_indices);
-    free(batch_block_tables);
+    free(batch.tokens);
+    free(batch.pos);
+    free(batch.seq_ids);
+    free(batch.output_indices);
+    free(batch.block_tables);
     free_run_state(&batch_state);
     
     for(int i=0; i<BATCH_SIZE; i++) {

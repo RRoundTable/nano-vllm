@@ -24,7 +24,7 @@ else
 endif
 
 # Sources
-SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c src/visualizer.c
+SRCS_C = src/main.c src/model.c src/tokenizer.c src/log.c src/sampler.c src/memory.c src/visualizer.c src/scheduler.c
 SRCS_KERNELS = src/kernels/layers.c src/kernels/attention.c
 
 # Objects

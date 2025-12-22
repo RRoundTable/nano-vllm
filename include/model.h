@@ -14,7 +14,8 @@ void transformer(int* tokens, int num_tokens, int pos, Config* p, RunState* s, W
 // Inference (Batched)
 void transformer_batch(int* tokens, int num_tokens, int* pos_arr, int* seq_ids, 
                        int* output_indices, int num_outputs,
-                       Config* p, RunState* s, Weights* w, BlockTable** block_tables);
+                       Config* p, RunState* s, Weights* w, BlockTable** block_tables,
+                       KVCacheManager* kv_manager);
 
 #endif // MODEL_H
 
